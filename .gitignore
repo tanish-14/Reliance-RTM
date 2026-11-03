@@ -1,0 +1,8 @@
+node_modules/
+dist/
+.pgdata/
+.env
+*.local
+coverage/
+apps/web/dev-dist/
+*.log

@@ -1,0 +1,29 @@
+{
+  "name": "rcpl-rtm",
+  "private": true,
+  "version": "0.1.0",
+  "description": "RCPL Route-to-Market platform (monorepo)",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ],
+  "scripts": {
+    "db:embedded": "node scripts/dev-db.mjs",
+    "build:shared": "npm run build -w @rtm/shared",
+    "db:migrate": "npm run prisma:migrate -w @rtm/api",
+    "db:seed": "npm run seed -w @rtm/api",
+    "db:reset": "npm run db:reset -w @rtm/api",
+    "dev:api": "npm run dev -w @rtm/api",
+    "dev:web": "npm run dev -w @rtm/web",
+    "build": "npm run build -w @rtm/shared && npm run build -w @rtm/api && npm run build -w @rtm/web",
+    "test": "npm run test -w @rtm/shared && npm run test -w @rtm/api",
+    "typecheck": "npm run typecheck --workspaces --if-present"
+  },
+  "devDependencies": {
+    "embedded-postgres": "17.9.0-beta.17",
+    "typescript": "5.7.3"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

@@ -1,0 +1,715 @@
+// RCPL RTM — schema v1.
+// Conventions:
+//  * every business table carries tenantId; services always filter by it
+//  * money is BIGINT paise; it moves only through Journal/LedgerEntry (append-only, balanced — see migration "immutability")
+//  * channel and RTM model are rows, not enums: behaviour is driven by their columns
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum Role {
+  ADMIN
+  MANAGER
+  DISTRIBUTOR
+  DSR
+  RETAILER
+}
+
+model Tenant {
+  id        String   @id @default(cuid())
+  code      String   @unique
+  name      String
+  createdAt DateTime @default(now())
+}
+
+/// Field hierarchy lives here too: DSR -> ASM -> RSM -> HQ via managerId; hierarchyPath is a
+/// materialised path ("/hq/rsm-w/asm-mum/") used for "me and everything under me" scoping.
+model User {
+  id            String    @id @default(cuid())
+  tenantId      String
+  email         String
+  name          String
+  phone         String?
+  passwordHash  String
+  role          Role
+  title         String?
+  active        Boolean   @default(true)
+  managerId     String?
+  manager       User?     @relation("Reports", fields: [managerId], references: [id])
+  reports       User[]    @relation("Reports")
+  hierarchyPath String
+  distributorId String?
+  distributor   Distributor? @relation(fields: [distributorId], references: [id])
+  outletId      String?
+  outlet        Outlet?   @relation(fields: [outletId], references: [id])
+  createdAt     DateTime  @default(now())
+  beats         Beat[]
+
+  @@unique([tenantId, email])
+  @@index([tenantId, hierarchyPath])
+}
+
+model Channel {
+  id                    String  @id @default(cuid())
+  tenantId              String
+  code                  String
+  name                  String
+  /// Minimum remaining shelf life (days) a batch must have to be allocated to this channel.
+  minResidualShelfDays  Int     @default(0)
+  config                Json    @default("{}")
+  outlets               Outlet[]
+
+  @@unique([tenantId, code])
+}
+
+/// Delivery model as data. The order engine reads these columns; adding a model is a row, not code.
+model RtmModel {
+  id                  String  @id @default(cuid())
+  tenantId            String
+  code                String
+  name                String
+  /// DISTRIBUTOR_WAREHOUSE | VAN | COMPANY_DEPOT
+  stockSource         String
+  /// ON_DISPATCH | ON_ORDER
+  invoiceTiming       String
+  /// Fulfil + deliver in the same transaction as order capture (van sales).
+  autoFulfil          Boolean @default(false)
+  requiresCreditCheck Boolean @default(true)
+  config              Json    @default("{}")
+  services            OutletService[]
+  orders              Order[]
+
+  @@unique([tenantId, code])
+}
+
+model Distributor {
+  id            String   @id @default(cuid())
+  tenantId      String
+  code          String
+  name          String
+  gstin         String
+  stateCode     String
+  city          String
+  address       String
+  lat           Float
+  lng           Float
+  tier          String?
+  /// hierarchyPath of the ASM responsible — managers see distributors under their path.
+  hierarchyPath String
+  active        Boolean  @default(true)
+  users         User[]
+  locations     StockLocation[]
+  beats         Beat[]
+  services      OutletService[]
+
+  @@unique([tenantId, code])
+}
+
+model StockLocation {
+  id            String      @id @default(cuid())
+  tenantId      String
+  distributorId String
+  distributor   Distributor @relation(fields: [distributorId], references: [id])
+  code          String
+  name          String
+  /// WAREHOUSE | VAN
+  type          String
+  /// For vans: the DSR operating it.
+  userId        String?
+  batches       InventoryBatch[]
+
+  @@unique([tenantId, code])
+}
+
+model Brand {
+  id       String    @id @default(cuid())
+  tenantId String
+  code     String
+  name     String
+  products Product[]
+
+  @@unique([tenantId, code])
+}
+
+model Product {
+  id            String   @id @default(cuid())
+  tenantId      String
+  brandId       String
+  brand         Brand    @relation(fields: [brandId], references: [id])
+  code          String
+  name          String
+  category      String
+  packSize      String
+  caseSize      Int
+  hsnCode       String
+  gstRateBp     Int
+  mrpPaise      BigInt
+  shelfLifeDays Int
+  active        Boolean  @default(true)
+  priceItems    PriceListItem[]
+
+  @@unique([tenantId, code])
+}
+
+/// Effective-dated. A price change is a new list (or version) with a later validFrom, never an edit in place.
+model PriceList {
+  id          String          @id @default(cuid())
+  tenantId    String
+  code        String
+  name        String
+  channelCode String?
+  stateCode   String?
+  priority    Int             @default(0)
+  validFrom   DateTime
+  validTo     DateTime?
+  active      Boolean         @default(true)
+  items       PriceListItem[]
+
+  @@unique([tenantId, code])
+}
+
+model PriceListItem {
+  id          String    @id @default(cuid())
+  priceListId String
+  priceList   PriceList @relation(fields: [priceListId], references: [id])
+  productId   String
+  product     Product   @relation(fields: [productId], references: [id])
+  basePaise   BigInt
+
+  @@unique([priceListId, productId])
+}
+
+model MarginRule {
+  id          String    @id @default(cuid())
+  tenantId    String
+  productId   String?
+  brandId     String?
+  channelCode String?
+  stateCode   String?
+  tier        String?
+  marginBp    Int
+  validFrom   DateTime
+  validTo     DateTime?
+  active      Boolean   @default(true)
+
+  @@index([tenantId])
+}
+
+model Scheme {
+  id           String   @id @default(cuid())
+  tenantId     String
+  code         String
+  name         String
+  /// QTY_SLAB | VALUE_SLAB | FREE_GOODS (Phase 4 adds COMBO, CASHBACK, TRADE_DISCOUNT)
+  type         String
+  status       String   @default("ACTIVE")
+  validFrom    DateTime
+  validTo      DateTime
+  channelCodes String[]
+  stateCodes   String[]
+  productIds   String[]
+  brandIds     String[]
+  rules        Json
+  priority     Int      @default(0)
+  budgetPaise  BigInt?
+
+  @@unique([tenantId, code])
+}
+
+model Outlet {
+  id        String   @id @default(cuid())
+  tenantId  String
+  code      String
+  name      String
+  ownerName String
+  phone     String
+  gstin     String?
+  channelId String
+  channel   Channel  @relation(fields: [channelId], references: [id])
+  tier      String?
+  stateCode String
+  city      String
+  address   String
+  lat       Float
+  lng       Float
+  geofenceM Int      @default(150)
+  active    Boolean  @default(true)
+  services  OutletService[]
+  beats     BeatOutlet[]
+  users     User[]
+
+  @@unique([tenantId, code])
+}
+
+/// Which distributor serves an outlet under which RTM model (optionally for a subset of brands).
+model OutletService {
+  id            String      @id @default(cuid())
+  tenantId      String
+  outletId      String
+  outlet        Outlet      @relation(fields: [outletId], references: [id])
+  rtmModelId    String
+  rtmModel      RtmModel    @relation(fields: [rtmModelId], references: [id])
+  distributorId String
+  distributor   Distributor @relation(fields: [distributorId], references: [id])
+  brandIds      String[]
+  isPrimary     Boolean     @default(true)
+
+  @@unique([outletId, rtmModelId, distributorId])
+}
+
+model Beat {
+  id            String       @id @default(cuid())
+  tenantId      String
+  code          String
+  name          String
+  distributorId String
+  distributor   Distributor  @relation(fields: [distributorId], references: [id])
+  dsrId         String
+  dsr           User         @relation(fields: [dsrId], references: [id])
+  /// 0 = Sunday … 6 = Saturday
+  daysOfWeek    Int[]
+  anchorLat     Float
+  anchorLng     Float
+  geofenceM     Int          @default(500)
+  outlets       BeatOutlet[]
+
+  @@unique([tenantId, code])
+}
+
+model BeatOutlet {
+  beatId   String
+  beat     Beat   @relation(fields: [beatId], references: [id])
+  outletId String
+  outlet   Outlet @relation(fields: [outletId], references: [id])
+  sequence Int
+
+  @@id([beatId, outletId])
+}
+
+/// Credit terms for an outlet with a distributor. Outstanding is never stored here — it is derived from the ledger.
+model CreditAccount {
+  id            String  @id @default(cuid())
+  tenantId      String
+  outletId      String
+  distributorId String
+  limitPaise    BigInt
+  creditDays    Int     @default(14)
+  blocked       Boolean @default(false)
+  blockReason   String?
+
+  @@unique([outletId, distributorId])
+}
+
+model InventoryBatch {
+  id         String        @id @default(cuid())
+  tenantId   String
+  locationId String
+  location   StockLocation @relation(fields: [locationId], references: [id])
+  productId  String
+  batchCode  String
+  /// SALEABLE | DAMAGED
+  bucket     String        @default("SALEABLE")
+  mfgDate    DateTime
+  expiryDate DateTime
+  qtyOnHand  Int
+
+  @@unique([locationId, productId, batchCode, bucket])
+  @@index([locationId, productId, bucket, expiryDate])
+}
+
+/// Append-only stock trail (DB trigger forbids UPDATE/DELETE).
+model StockMovement {
+  id        String   @id @default(cuid())
+  tenantId  String
+  batchId   String
+  qty       Int
+  reason    String
+  refType   String
+  refId     String
+  createdAt DateTime @default(now())
+
+  @@index([batchId])
+}
+
+model DocSequence {
+  id       String @id @default(cuid())
+  tenantId String
+  scope    String
+  next     Int    @default(1)
+
+  @@unique([tenantId, scope])
+}
+
+model Order {
+  id               String      @id @default(cuid())
+  tenantId         String
+  orderNo          String
+  /// DSR | EB2B | MT_FEED | ECOM_FEED | QCOM_FEED
+  source           String
+  outletId         String
+  distributorId    String
+  rtmModelId       String
+  rtmModel         RtmModel    @relation(fields: [rtmModelId], references: [id])
+  channelCode      String
+  placedById       String
+  status           String
+  flags            String[]
+  capturedAt       DateTime
+  pricedAt         DateTime
+  receivedAt       DateTime    @default(now())
+  grossPaise       BigInt
+  marginDiscPaise  BigInt
+  schemeDiscPaise  BigInt
+  taxablePaise     BigInt
+  taxPaise         BigInt
+  totalPaise       BigInt
+  clientTotalPaise BigInt?
+  isInterState     Boolean
+  /// Sync idempotency key (+ split index when an order is split across RTM models).
+  sourceKey        String?
+  notes            String?
+  updatedAt        DateTime    @updatedAt
+  lines            OrderLine[]
+  events           OrderEvent[]
+  invoices         Invoice[]
+
+  @@unique([tenantId, orderNo])
+  @@unique([tenantId, sourceKey])
+  @@index([tenantId, distributorId, status])
+  @@index([tenantId, outletId])
+}
+
+model OrderLine {
+  id               String  @id @default(cuid())
+  orderId          String
+  order            Order   @relation(fields: [orderId], references: [id])
+  productId        String
+  qty              Int
+  freeQty          Int     @default(0)
+  qtyInvoiced      Int     @default(0)
+  freeInvoiced     Int     @default(0)
+  unitPricePaise   BigInt
+  grossPaise       BigInt
+  marginBp         Int
+  marginDiscPaise  BigInt
+  schemeDiscPaise  BigInt
+  taxablePaise     BigInt
+  gstRateBp        Int
+  taxPaise         BigInt
+  totalPaise       BigInt
+  appliedSchemes   Json
+}
+
+model OrderEvent {
+  id         String   @id @default(cuid())
+  orderId    String
+  order      Order    @relation(fields: [orderId], references: [id])
+  fromStatus String?
+  toStatus   String
+  actorId    String
+  note       String?
+  at         DateTime @default(now())
+}
+
+model Invoice {
+  id            String        @id @default(cuid())
+  tenantId      String
+  invoiceNo     String
+  orderId       String
+  order         Order         @relation(fields: [orderId], references: [id])
+  distributorId String
+  outletId      String
+  supplierGstin String
+  buyerGstin    String?
+  placeOfSupply String
+  isInterState  Boolean
+  taxablePaise  BigInt
+  cgstPaise     BigInt
+  sgstPaise     BigInt
+  igstPaise     BigInt
+  totalPaise    BigInt
+  /// ISSUED | CANCELLED
+  status        String        @default("ISSUED")
+  /// Phase 4: IRN + e-way bill from the GST provider.
+  irn           String?
+  issuedAt      DateTime      @default(now())
+  dueDate       DateTime
+  journalId     String
+  lines         InvoiceLine[]
+  deliveries    Delivery[]
+
+  @@unique([tenantId, invoiceNo])
+}
+
+model InvoiceLine {
+  id             String  @id @default(cuid())
+  invoiceId      String
+  invoice        Invoice @relation(fields: [invoiceId], references: [id])
+  orderLineId    String
+  productId      String
+  batchId        String
+  qty            Int
+  freeQty        Int
+  hsnCode        String
+  unitPricePaise BigInt
+  taxablePaise   BigInt
+  gstRateBp      Int
+  cgstPaise      BigInt
+  sgstPaise      BigInt
+  igstPaise      BigInt
+  totalPaise     BigInt
+}
+
+model Delivery {
+  id            String    @id @default(cuid())
+  tenantId      String
+  invoiceId     String
+  invoice       Invoice   @relation(fields: [invoiceId], references: [id])
+  /// DISPATCHED | DELIVERED | CANCELLED
+  status        String
+  dispatchedAt  DateTime  @default(now())
+  deliveredAt   DateTime?
+  deliveredById String?
+  podNote       String?
+}
+
+/// Credit note: for returns now; for cancellations after invoice and scheme corrections later.
+model CreditNote {
+  id            String   @id @default(cuid())
+  tenantId      String
+  creditNoteNo  String
+  /// RETURN | CANCELLATION
+  reason        String
+  distributorId String
+  outletId      String
+  invoiceId     String?
+  returnId      String?
+  taxablePaise  BigInt
+  taxPaise      BigInt
+  totalPaise    BigInt
+  journalId     String
+  issuedAt      DateTime @default(now())
+
+  @@unique([tenantId, creditNoteNo])
+}
+
+model Payment {
+  id             String   @id @default(cuid())
+  tenantId       String
+  receiptNo      String
+  distributorId  String
+  outletId       String
+  /// CASH | UPI (Phase 4: CHEQUE, ONLINE, BANK_TRANSFER)
+  mode           String
+  amountPaise    BigInt
+  /// RECEIVED | PENDING_VERIFICATION | VERIFIED | FAILED
+  status         String
+  reference      String?
+  collectedById  String
+  capturedAt     DateTime
+  sourceKey      String?
+  journalId      String
+  createdAt      DateTime @default(now())
+
+  @@unique([tenantId, receiptNo])
+  @@unique([tenantId, sourceKey])
+}
+
+model Return {
+  id            String       @id @default(cuid())
+  tenantId      String
+  returnNo      String
+  outletId      String
+  distributorId String
+  capturedById  String
+  capturedAt    DateTime
+  /// REQUESTED | ACCEPTED | REJECTED
+  status        String
+  reason        String
+  sourceKey     String?
+  decidedById   String?
+  decidedAt     DateTime?
+  creditNoteId  String?
+  lines         ReturnLine[]
+
+  @@unique([tenantId, returnNo])
+  @@unique([tenantId, sourceKey])
+}
+
+model ReturnLine {
+  id               String @id @default(cuid())
+  returnId         String
+  return           Return @relation(fields: [returnId], references: [id])
+  productId        String
+  qty              Int
+  /// SALEABLE | DAMAGED | EXPIRED
+  condition        String
+  batchCode        String?
+  unitCreditPaise  BigInt?
+}
+
+model Attendance {
+  id        String   @id @default(cuid())
+  tenantId  String
+  userId    String
+  beatId    String?
+  kind      String
+  capturedAt DateTime
+  lat       Float
+  lng       Float
+  accuracyM Float?
+  distanceM Int?
+  flags     String[]
+  sourceKey String
+  createdAt DateTime @default(now())
+
+  @@unique([tenantId, sourceKey])
+  @@index([tenantId, userId, capturedAt])
+}
+
+model Visit {
+  id            String   @id @default(cuid())
+  tenantId      String
+  userId        String
+  outletId      String
+  beatId        String?
+  capturedAt    DateTime
+  lat           Float
+  lng           Float
+  distanceM     Int
+  outcome       String
+  noOrderReason String?
+  flags         String[]
+  sourceKey     String
+
+  @@unique([tenantId, sourceKey])
+}
+
+/// Secondary (distributor -> retailer) sales fact, written at invoice (+) and credit note (-). Append-only.
+model SecondarySale {
+  id            String   @id @default(cuid())
+  tenantId      String
+  date          DateTime
+  /// SALE | RETURN | CANCELLATION
+  kind          String
+  distributorId String
+  outletId      String
+  channelCode   String
+  rtmModelCode  String
+  productId     String
+  brandId       String
+  dsrId         String?
+  qty           Int
+  freeQty       Int
+  netPaise      BigInt
+  docType       String
+  docId         String
+
+  @@index([tenantId, date])
+  @@index([tenantId, distributorId, productId])
+}
+
+model LedgerAccount {
+  id        String  @id @default(cuid())
+  tenantId  String
+  /// Whose books: a distributor id or "COMPANY".
+  bookOwner String
+  code      String
+  name      String
+  /// ASSET | LIABILITY | INCOME | EXPENSE | EQUITY
+  type      String
+  partyType String?
+  partyId   String?
+  entries   LedgerEntry[]
+
+  @@unique([tenantId, bookOwner, code])
+  @@index([tenantId, partyType, partyId])
+}
+
+/// Append-only. Corrections are new journals with reversalOfId set — never edits.
+model Journal {
+  id           String        @id @default(cuid())
+  tenantId     String
+  bookOwner    String
+  docType      String
+  docId        String
+  narration    String
+  postedById   String
+  postedAt     DateTime      @default(now())
+  reversalOfId String?       @unique
+  entries      LedgerEntry[]
+
+  @@index([tenantId, docType, docId])
+}
+
+/// Append-only; each journal must balance (deferred constraint trigger).
+model LedgerEntry {
+  id          String        @id @default(cuid())
+  journalId   String
+  journal     Journal       @relation(fields: [journalId], references: [id])
+  accountId   String
+  account     LedgerAccount @relation(fields: [accountId], references: [id])
+  debitPaise  BigInt        @default(0)
+  creditPaise BigInt        @default(0)
+
+  @@index([accountId])
+}
+
+/// One row per applied sync mutation; the unique key is what makes retries exactly-once.
+model SyncInbox {
+  id             String   @id @default(cuid())
+  tenantId       String
+  idempotencyKey String
+  userId         String
+  deviceId       String
+  type           String
+  requestHash    String
+  status         String
+  result         Json
+  createdAt      DateTime @default(now())
+
+  @@unique([tenantId, idempotencyKey])
+}
+
+/// Review queue: things accepted but needing a human (credit holds, geofence, price drift).
+model ExceptionItem {
+  id            String    @id @default(cuid())
+  tenantId      String
+  kind          String
+  refType       String
+  refId         String
+  distributorId String?
+  summary       String
+  details       Json      @default("{}")
+  status        String    @default("OPEN")
+  resolvedById  String?
+  resolvedAt    DateTime?
+  resolution    String?
+  createdAt     DateTime  @default(now())
+
+  @@index([tenantId, status])
+}
+
+/// Immutable audit trail (DB trigger forbids UPDATE/DELETE/TRUNCATE).
+model AuditLog {
+  id         BigInt   @id @default(autoincrement())
+  tenantId   String
+  actorId    String
+  actorRole  String
+  action     String
+  entityType String
+  entityId   String
+  before     Json?
+  after      Json?
+  meta       Json?
+  at         DateTime @default(now())
+
+  @@index([tenantId, entityType, entityId])
+  @@index([tenantId, at])
+}
