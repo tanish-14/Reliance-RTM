@@ -65,8 +65,9 @@ export class OrdersService {
   async createFieldOrder(
     tx: Tx,
     user: AuthUser,
-    m: { idempotencyKey: string; capturedAt: string; payload: { outletId: string; lines: { productId: string; qty: number }[]; clientTotalPaise: number; notes?: string } },
+    m: { idempotencyKey: string; capturedAt: string; payload: { outletId: string; lines: { productId: string; qty: number }[]; clientTotalPaise: number; notes?: string; paymentMode?: string } },
     now: Date,
+    source?: string,
   ) {
     const p = m.payload;
     await this.scope.assertOutlet(tx, user, p.outletId);
@@ -97,7 +98,8 @@ export class OrdersService {
     }
 
     const serverTotal = priced.reduce((a, x) => a + x.priced.totalPaise, 0);
-    const delta = serverTotal - p.clientTotalPaise;
+    // A negative client total means "no price was quoted" (e.g. a partner PO without a value).
+    const delta = p.clientTotalPaise < 0 ? 0 : serverTotal - p.clientTotalPaise;
     if (delta !== 0) flags.push('PRICE_MISMATCH');
 
     const refs: string[] = [];
@@ -107,12 +109,13 @@ export class OrdersService {
         outlet,
         service: g.service,
         priced: g.priced,
-        source: 'DSR',
+        source: source ?? (user.role === 'RETAILER' ? 'EB2B' : 'DSR'),
+        paymentMode: p.paymentMode ?? 'CREDIT',
         capturedAt,
         pricedAt: at,
         flags,
         priceDeltaPaise: delta,
-        clientTotalPaise: priced.length === 1 ? p.clientTotalPaise : null,
+        clientTotalPaise: priced.length === 1 && p.clientTotalPaise >= 0 ? p.clientTotalPaise : null,
         sourceKey: `${m.idempotencyKey}#${i}`,
         notes: p.notes,
       });
@@ -131,6 +134,7 @@ export class OrdersService {
       service: Service;
       priced: PricedOrder;
       source: string;
+      paymentMode?: string;
       capturedAt: Date;
       pricedAt: Date;
       flags: string[];
@@ -143,14 +147,18 @@ export class OrdersService {
     const flags = [...a.flags];
     const total = BigInt(a.priced.totalPaise);
     let creditPosition = null;
-    if (a.service.rtmModel.requiresCreditCheck) {
+    const paymentMode = a.paymentMode ?? 'CREDIT';
+    if (paymentMode === 'ONLINE') flags.push('AWAITING_PAYMENT');
+    if (paymentMode === 'COD') flags.push('COD');
+    // Credit exposure only arises for orders on credit; prepaid and COD don't use the limit.
+    if (paymentMode === 'CREDIT' && a.service.rtmModel.requiresCreditCheck) {
       const c = await this.credit.check(tx, user.tenantId, a.outlet.id, a.service.distributorId, total);
       flags.push(...c.flags);
       creditPosition = c.position;
     }
     // Hold when credit is breached/blocked, or the retailer would pay more than the device showed.
     const holdReasons = flags.filter(
-      (f) => f === 'CREDIT_BREACH' || f === 'CREDIT_BLOCKED' || (f === 'PRICE_MISMATCH' && a.priceDeltaPaise > 0),
+      (f) => f === 'CREDIT_BREACH' || f === 'CREDIT_BLOCKED' || f === 'AWAITING_PAYMENT' || (f === 'PRICE_MISMATCH' && a.priceDeltaPaise > 0),
     );
 
     const orderNo = await this.seq.opNo(tx, user.tenantId, 'SO');
@@ -174,10 +182,12 @@ export class OrdersService {
         taxablePaise: BigInt(a.priced.taxablePaise),
         taxPaise: BigInt(a.priced.taxPaise),
         totalPaise: total,
+        cashbackPaise: BigInt(a.priced.cashbackPaise ?? 0),
         clientTotalPaise: a.clientTotalPaise === null ? null : BigInt(a.clientTotalPaise),
         isInterState: a.priced.isInterState,
         sourceKey: a.sourceKey,
         notes: a.notes,
+        paymentMode,
         lines: {
           create: a.priced.lines.map((l) => ({
             productId: l.productId,
@@ -208,9 +218,10 @@ export class OrdersService {
       user.userId,
       hold ? `Held for review: ${holdReasons.join(', ')}` : 'Auto-confirmed',
     );
-    if (hold || flags.includes('PRICE_MISMATCH') || flags.includes('STALE_CAPTURE') || flags.includes('CLOCK_SKEW')) {
+    const reviewable = holdReasons.some((f) => f !== 'AWAITING_PAYMENT');
+    if (reviewable || flags.includes('PRICE_MISMATCH') || flags.includes('STALE_CAPTURE') || flags.includes('CLOCK_SKEW')) {
       await this.reviews.raise(tx, user.tenantId, {
-        kind: hold ? 'ORDER_HOLD' : 'ORDER_FLAGGED',
+        kind: reviewable ? 'ORDER_HOLD' : 'ORDER_FLAGGED',
         refType: 'Order',
         refId: order.id,
         distributorId: order.distributorId,
@@ -269,6 +280,7 @@ export class OrdersService {
     if (!order) throw notFound('Order');
     await this.scope.assertDistributor(tx, user, order.distributorId);
     await this.state.transition(tx, order.id, order.status, 'CLOSED', user.userId, `Short-closed: ${reason}`);
+    await this.fulfilment.creditCashback(tx, user, order.id);
     await this.audit.record(tx, user, 'ORDER_SHORT_CLOSED', 'Order', order.id, { meta: { reason } });
   }
 

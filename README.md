@@ -1,11 +1,14 @@
 # RCPL Route-to-Market (RTM) Platform
 
-Offline-first distribution management for RCPL: field sales (DSR), distributor fulfilment, HQ, retailer and admin surfaces on one platform. Status by phase: see [PROGRESS.md](PROGRESS.md).
+Offline-first distribution management for RCPL: field sales (DSR), distributors, HQ / managers, retailers (eB2B) and admin on one platform, across GT, MT, e-commerce, quick commerce and HoReCa, and every delivery model (distributor-led, pre-sell, van sales, DSD, wholesale, eB2B) as configuration. Phase status and decisions: [PROGRESS.md](PROGRESS.md).
 
 ```
-packages/shared   pricing / margin / scheme engine, GST, order state machine, zod schemas (used by device AND server)
-apps/api          NestJS + Prisma + PostgreSQL — auth, RBAC, sync, orders, fulfilment, ledger, audit
-apps/web          React + Vite PWA — Dexie (IndexedDB) offline store, sync queue, role shells
+packages/shared   pricing / margin / scheme engine, GST, order state machine, zod schemas (device AND server)
+apps/api          NestJS + Prisma + PostgreSQL: auth (JWT + TOTP MFA), RBAC, sync, orders, fulfilment,
+                  double-entry ledger, payments & recon, schemes & claims, approvals, channel intake,
+                  GST e-invoice, DPDP, analytics, job queue
+apps/web          React + Vite PWA: Dexie (IndexedDB) offline store + sync queue; DSR, distributor,
+                  HQ, retailer (eB2B) and admin surfaces
 ```
 
 ## Run locally
@@ -16,13 +19,13 @@ Requires Node 20+.
 npm install
 ```
 
-**1. Database.** Either Docker:
+**1. Database.** Either Docker (Postgres 16 + Redis 7):
 
 ```bash
 docker compose up -d
 ```
 
-(then set `DATABASE_URL` in `apps/api/.env` to port **5432**), or, with no Docker, a real embedded PostgreSQL 17 on port **5433** (keep it running in its own terminal):
+(then set `DATABASE_URL` in `apps/api/.env` to port **5432**), or, with no Docker, a real embedded PostgreSQL 17 on port **5433** (keep it running in its own terminal). It always creates UTF-8 databases:
 
 ```bash
 npm run db:embedded
@@ -46,7 +49,7 @@ npm run db:migrate
 npm run db:seed
 ```
 
-To start over with a clean database later: `npm run db:reset` (drops all data, re-migrates, re-seeds — local dev DB only).
+To start over with a clean database: `npm run db:reset` (drops all data, re-migrates, re-seeds; local dev DB only).
 
 **3. Start the API and the web app** (two terminals):
 
@@ -58,9 +61,9 @@ npm run dev:api
 npm run dev:web
 ```
 
-Open http://localhost:5173. The API listens on http://localhost:3000/api (`/api/health`).
+Open http://localhost:5173. API: http://localhost:3000/api (`/api/health`). Background jobs (e-invoice, UPI verification, payment expiry, credit review, integrations) run inside the API process on the Postgres-backed queue; set `QUEUE_DRIVER=bullmq` + `REDIS_URL` to run them through BullMQ instead.
 
-To try the real installable/offline PWA (service worker is only generated in a build):
+Installable / offline PWA (the service worker only exists in a build):
 
 ```bash
 npm run build -w @rtm/web && npm run preview -w @rtm/web
@@ -72,31 +75,23 @@ then open http://localhost:4173.
 
 All seeded accounts use password **`Rcpl@1234`** (demo data only). The login page has one-click buttons.
 
-| Role | Email |
-|---|---|
-| DSR (Mumbai, has a van) | `dsr.ravi@rcpl.test` |
-| Other DSRs | `dsr.sunil@` (Mumbai, pre-sell), `dsr.hetal@` (Ahmedabad), `dsr.aman@` (Delhi), `dsr.kavya@` (Bengaluru) |
-| Distributor | `dist.mh01@rcpl.test` (also `dist.gj01@`, `dist.dl01@`, `dist.ka01@`) |
-| HQ / managers | `hq@rcpl.test`, `rsm.west@`, `asm.mumbai@` … (each sees only their territory) |
-| Retailer (one per channel) | `retailer.gt@`, `retailer.mt@`, `retailer.ecom@`, `retailer.qcom@`, `retailer.horeca@` |
-| Admin | `admin@rcpl.test` |
+| Role | Email | Notes |
+|---|---|---|
+| DSR | `dsr.ravi@rcpl.test` | Mumbai, has a van. Others: `dsr.sunil@`, `dsr.hetal@`, `dsr.aman@`, `dsr.kavya@` |
+| Distributor | `dist.mh01@rcpl.test` | also `dist.gj01@`, `dist.dl01@`, `dist.ka01@` |
+| HQ / managers | `hq@rcpl.test`, `rsm.west@`, `asm.mumbai@` … | **MFA**: enrol on first login. With `DEMO_MODE=1` the login screen shows the current code |
+| Retailer (eB2B) | `retailer.gt@`, `retailer.mt@`, `retailer.ecom@`, `retailer.qcom@`, `retailer.horeca@` | accepts the privacy notice on first use |
+| Admin | `admin@rcpl.test` | MFA as above |
 
-## Demo script (the Phase 1 + 3 slice)
+Trading-partner intake (MT / e-com / q-com): `POST /api/integrations/orders/<PARTNER>` with `X-Partner-Key: <partner>-demo-key` and `X-Partner-Signature: hex(HMAC-SHA256(body, "<partner>-demo-secret"))`, partners `STAR-HYPER`, `SHOPKART`, `ZIPMART` (lower-case in the key/secret). Admin → *Schemes, partners, privacy → Trading partners* lets you send payloads through the same adapter without credentials.
 
-1. **DSR** (`dsr.ravi`) — open on a phone-size window. Masters download to IndexedDB.
-2. *Settings → Airplane mode (demo)* on. *Today → Check in* (geofenced; outside the fence is recorded + flagged).
-3. Open **Gupta Super Mart** → *Take order*: 48 × Campa Cola 200 ml, 16 × Atta 5 kg, 24 × Soya oil. The device prices it offline: GOLD-tier margin, `CAMPA-WINTER-QTY` slab, `CAMPA200-FREE` (+4 free), `IND-VALUE-SLAB`, CGST+SGST.
-4. *Collect payment* → cash ₹1,500. *Sync queue* shows 3 items **Waiting**.
-5. Airplane mode off → all **Synced** with order/receipt numbers. *Replay synced items* → server answers **3 DUPLICATE** (nothing created twice).
-6. **Distributor** (`dist.mh01`) → the order → *Fulfil & invoice* (FEFO; near-expiry batches held back for GT) → *Mark delivered* → order **CLOSED**.
-7. **HQ** (`hq`) → secondary sales, AR exposure and cash-in-transit reflect the above.
+## Demo script
 
-More edge cases to try:
-- **Credit breach:** Laxmi Kirana (first outlet on every beat) has a ₹2,000 limit — a bigger order syncs as **ON_HOLD / CREDIT_BREACH**; approve or reject it on the HQ overview.
-- **Partial fulfilment:** Atta 10 kg has only 6 units at MH01 → invoice ships 6, order goes **PARTIALLY_FULFILLED** with **BACKORDER**; *Close backorder* or fulfil again later.
-- **Outlet served by two models:** Om Sai General Store (Ravi's 2nd outlet) gets Campa off the van (invoiced + delivered on the spot) and staples distributor-led — one order on the device becomes two on the server.
-- **Cancel after invoice:** cancelling an undelivered invoiced order issues a credit note and a reversing journal.
-- **Damaged return:** DSR *Market return* → distributor *Returns → Accept & credit* → credit note, AR reduced, stock into the DAMAGED bucket.
+1. **DSR offline visit** (`dsr.ravi`, phone-size window): *Settings → Airplane mode* on → *Check in* → *Gupta Super Mart → Take order* (device prices it: margin, quantity slab, free goods, value slab, GST) → *Collect payment* cash or cheque → *Sync queue* shows items waiting → airplane mode off → all **Synced** → *Replay synced items* returns **DUPLICATE** for each, so nothing is created twice.
+2. **Distributor** (`dist.mh01`): open the order → *Fulfil & invoice* (FEFO; near-expiry batches held back) → IRN appears within seconds (e-way bill too above ₹50,000) → *Mark delivered*. *Receipts* (cheques: deposit / cleared / bounced; refunds), *Cash & bank* (statement import auto-matches deposits, cheques, transfers; the rest goes to the exception queue), *Credit* (ageing; request a limit change), *Claims* (validated against invoiced secondary sales).
+3. **Retailer eB2B** (`retailer.gt`): accept the privacy notice → *Shop* (offers applied on the device) → **Pay now** → checkout: *Simulate bank decline* then *Pay with UPI* → the signed gateway webhook confirms the order. Also try **Cash on delivery** (distributor collects at the door) and **Khata** (credit). *Dues & payments* → pay outstanding online. *Privacy* → download data, withdraw consents, request erasure.
+4. **HQ** (`hq`, MFA): *Overview*, *Distribution & KPIs* (numeric / weighted distribution, strike rate, pipeline gap, scheme ROI, ageing), *Approvals* (scheme activation, credit limits, claims by level and territory), *Claims*, *Exceptions*, *Audit trail*.
+5. **Admin** (`admin`, MFA): master data CRUD + CSV bulk import (dry run first), price revisions as dated versions, new channels / RTM models, schemes (draft, then request activation), partners, integrations and jobs, privacy requests.
 
 ## Tests
 
@@ -104,11 +99,16 @@ More edge cases to try:
 npm test
 ```
 
-Runs the shared engine tests (pricing, schemes, GST, GSTIN, routing, state machine).
+- `packages/shared`: 21 unit tests (pricing, all scheme types, GST, GSTIN, routing, state machine, master-data schemas, CSV).
+- `apps/api`: 50 end-to-end tests against a real Postgres (`TEST_DATABASE_URL`, rebuilt each run): sync idempotency incl. concurrent retries, price-changed-offline, credit holds, ledger balance and immutability at the DB, cancellations and returns, master data and import, online payments and webhooks, COD, cash deposit variance, bank recon, cheque bounce auto-block, UPI verification, IRN / e-way bill, claims (validation, de-dup, inflation), scheme budget / correction / cashback, partner intake, MFA, approvals, DPDP, KPIs, integrations.
 
 ## Guarantees enforced in the database
 
-See `apps/api/prisma/migrations/*_immutability/migration.sql`:
-- `AuditLog`, `Journal`, `LedgerEntry`, `StockMovement`, `SecondarySale` reject UPDATE / DELETE / TRUNCATE.
-- Every journal must balance (deferred constraint trigger at commit); ledger lines are one-sided.
-- Stock can't go negative; sync idempotency keys are unique per tenant.
+See `apps/api/prisma/migrations/*`:
+- `AuditLog`, `Journal`, `LedgerEntry`, `StockMovement`, `SecondarySale`, `SchemeUsage`, `Consent` reject UPDATE / DELETE (and TRUNCATE for the ledger/audit set).
+- Every journal balances (deferred constraint trigger at commit); ledger lines are one-sided; stock can't go negative; claim approvals can't exceed validated amounts.
+- Idempotency: sync keys, partner order refs, gateway event ids and payment ids are unique.
+
+## Production notes (not done here)
+
+India data residency: deploy Postgres, Redis and the API in an Indian region (e.g. Mumbai), backups included. Use TLS everywhere and turn on encryption at rest (managed-disk / RDS encryption). Real Razorpay keys go in env and never in the repo; card data never reaches this system (hosted checkout). Unset `DEMO_MODE`. Swap the mock GST, ERP, 3PL and marketplace connectors for real ones (same interfaces).

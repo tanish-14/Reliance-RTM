@@ -38,6 +38,7 @@ export class ErrorFilter implements ExceptionFilter {
     }
     // Unexpected: logged by pino-http via res.err; never leak internals.
     (res as Response & { err?: Error }).err = err as Error;
+    if (process.env.DEBUG_ERRORS) console.error(err);
     res.status(500).json({ code: 'INTERNAL', message: 'Something went wrong' });
   }
 }

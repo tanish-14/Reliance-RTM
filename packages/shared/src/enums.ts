@@ -31,7 +31,9 @@ export type OrderFlag = (typeof ORDER_FLAGS)[number];
 export const RETURN_CONDITIONS = ['SALEABLE', 'DAMAGED', 'EXPIRED'] as const;
 export type ReturnCondition = (typeof RETURN_CONDITIONS)[number];
 
-export const COLLECTION_MODES = ['CASH', 'UPI'] as const;
+export const COLLECTION_MODES = ['CASH', 'UPI', 'CHEQUE'] as const;
+export const PAYMENT_MODES = ['CREDIT', 'COD', 'ONLINE'] as const;
+export type PaymentMode = (typeof PAYMENT_MODES)[number];
 export type CollectionMode = (typeof COLLECTION_MODES)[number];
 
 /** 2-digit GST state codes used in seed data and place-of-supply logic. */

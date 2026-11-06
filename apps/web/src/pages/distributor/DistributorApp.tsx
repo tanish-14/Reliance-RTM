@@ -4,8 +4,9 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import { rupees } from '@rtm/shared';
 import { api } from '../../lib/api';
 import { dt, statusTone } from '../../lib/format';
-import { Badge, Button, Card, Empty, ErrorNote, Input, Table, Td } from '../../components/ui';
+import { Badge, Button, Card, Empty, ErrorNote, Input, PromptButton, Table, Td } from '../../components/ui';
 import { Shell } from '../../components/Shell';
+import { CashBank, Claims, Credit, Payments } from './DistributorMoney';
 
 export function DistributorApp() {
   return (
@@ -14,6 +15,10 @@ export function DistributorApp() {
         { to: '/distributor', label: 'Orders', end: true },
         { to: '/distributor/returns', label: 'Returns' },
         { to: '/distributor/stock', label: 'Stock' },
+        { to: '/distributor/payments', label: 'Receipts' },
+        { to: '/distributor/cash', label: 'Cash & bank' },
+        { to: '/distributor/credit', label: 'Credit' },
+        { to: '/distributor/claims', label: 'Claims' },
       ]}
     >
       <Routes>
@@ -21,6 +26,10 @@ export function DistributorApp() {
         <Route path="orders/:id" element={<OrderDetail />} />
         <Route path="returns" element={<Returns />} />
         <Route path="stock" element={<Stock />} />
+        <Route path="payments" element={<Payments />} />
+        <Route path="cash" element={<CashBank />} />
+        <Route path="credit" element={<Credit />} />
+        <Route path="claims" element={<Claims />} />
       </Routes>
     </Shell>
   );
@@ -108,7 +117,7 @@ function OrderDetail() {
       >
         <div className="mb-3 grid gap-1 text-sm text-slate-600 sm:grid-cols-2">
           <div>Outlet: <span className="font-medium text-slate-800">{o.outlet.name}</span> ({o.channelCode}, {o.outlet.stateCode})</div>
-          <div>Model: {o.rtmModel.name} · {o.isInterState ? 'IGST (inter-state)' : 'CGST + SGST'}</div>
+          <div>Model: {o.rtmModel.name} · {o.isInterState ? 'IGST (inter-state)' : 'CGST + SGST'} · pays by {o.paymentMode}</div>
           <div>Captured {dt(o.capturedAt)} · priced as of {dt(o.pricedAt)}</div>
           <div>Total {rupees(o.totalPaise)} (taxable {rupees(o.taxablePaise)}, scheme −{rupees(o.schemeDiscPaise)}, margin −{rupees(o.marginDiscPaise)})</div>
         </div>
@@ -142,9 +151,20 @@ function OrderDetail() {
                   </div>
                   {inv.deliveries.map((d: any) =>
                     d.status === 'DISPATCHED' ? (
-                      <Button key={d.id} variant="secondary" disabled={act.isPending} onClick={() => act.mutate({ path: `/deliveries/${d.id}/deliver`, body: { podNote: 'Received by retailer' } })}>
-                        Mark delivered
-                      </Button>
+                      o.paymentMode === 'COD' ? (
+                        <PromptButton
+                          key={d.id}
+                          label="Delivered + collect COD"
+                          placeholder="₹ collected"
+                          defaultValue={String(inv.totalPaise / 100)}
+                          confirmLabel="Collected"
+                          onSubmit={(v) => act.mutate({ path: `/deliveries/${d.id}/deliver`, body: { podNote: 'COD', cod: { mode: 'CASH', amountPaise: Math.round(Number(v) * 100) } } })}
+                        />
+                      ) : (
+                        <Button key={d.id} variant="secondary" disabled={act.isPending} onClick={() => act.mutate({ path: `/deliveries/${d.id}/deliver`, body: { podNote: 'Received by retailer' } })}>
+                          Mark delivered
+                        </Button>
+                      )
                     ) : (
                       <Badge key={d.id} tone={statusTone[d.status]}>{d.status}{d.deliveredAt ? ` ${dt(d.deliveredAt)}` : ''}</Badge>
                     ),
@@ -152,6 +172,14 @@ function OrderDetail() {
                 </div>
                 <div className="mt-1 text-xs text-slate-500">
                   GSTIN {inv.supplierGstin} → {inv.buyerGstin ?? 'unregistered'} · PoS {inv.placeOfSupply} · taxable {rupees(inv.taxablePaise)} · CGST {rupees(inv.cgstPaise)} · SGST {rupees(inv.sgstPaise)} · IGST {rupees(inv.igstPaise)}
+                </div>
+                <div className="mt-1 flex flex-wrap gap-1 text-xs">
+                  <Badge tone={inv.irnStatus === 'GENERATED' ? 'green' : inv.irnStatus === 'FAILED' ? 'red' : 'slate'}>IRN {inv.irnStatus.replace('_', ' ').toLowerCase()}</Badge>
+                  {inv.irn && <span className="font-mono text-slate-500" title={inv.irn}>{inv.irn.slice(0, 16)}… ack {inv.ackNo}</span>}
+                  {inv.ewbStatus !== 'NOT_REQUIRED' && <Badge tone={inv.ewbStatus === 'GENERATED' ? 'green' : 'amber'}>e-way bill {inv.ewbNo ?? inv.ewbStatus.toLowerCase()}</Badge>}
+                  {inv.status === 'ISSUED' && (
+                    <PromptButton variant="ghost" label="Correct a scheme…" placeholder="Scheme code" confirmLabel="Issue debit note" onSubmit={(code) => act.mutate({ path: `/invoices/${inv.id}/scheme-correction`, body: { schemeCode: code, reason: 'Applied in error' } })} />
+                  )}
                 </div>
                 <div className="mt-1 text-xs text-slate-500">Batches: {inv.lines.map((l: any) => `${o.products[l.productId]?.code} ×${l.qty}${l.freeQty ? `+${l.freeQty}` : ''}`).join(', ')}</div>
               </div>

@@ -9,6 +9,7 @@ import { SequenceService } from '../core/sequence.service';
 import { AuditService } from '../core/audit.service';
 import { ScopeService } from '../core/scope.service';
 import { PricingService } from '../orders/pricing.service';
+import { JobsService } from '../jobs/jobs.service';
 
 const DAY = 86_400_000;
 
@@ -26,6 +27,7 @@ export class ReturnsService {
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
     private readonly pricing: PricingService,
+    private readonly jobs: JobsService,
   ) {}
 
   async capture(
@@ -175,6 +177,7 @@ export class ReturnsService {
         docId: cnId,
       })),
     });
+    await this.jobs.enqueue(tx, 'gst.creditnote', { creditNoteId: cnId }, { key: 'gst.creditnote:' + cnId, tenantId: ret.tenantId });
     await tx.return.update({
       where: { id: ret.id },
       data: { status: 'ACCEPTED', decidedById: user.userId, decidedAt: new Date(), creditNoteId: cnId },

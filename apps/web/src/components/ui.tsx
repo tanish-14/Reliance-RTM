@@ -1,4 +1,4 @@
-import type { ButtonHTMLAttributes, InputHTMLAttributes, ReactNode, SelectHTMLAttributes } from 'react';
+import { useState, type ButtonHTMLAttributes, type InputHTMLAttributes, type ReactNode, type SelectHTMLAttributes } from 'react';
 
 const cx = (...c: (string | false | null | undefined)[]) => c.filter(Boolean).join(' ');
 
@@ -96,3 +96,17 @@ export function Table({ head, children }: { head: ReactNode[]; children: ReactNo
 }
 
 export const Td = ({ children, className }: { children?: ReactNode; className?: string }) => <td className={cx('px-4 py-2 align-top', className)}>{children}</td>;
+
+/** Button that opens an inline input + confirm (instead of window.prompt). */
+export function PromptButton({ label, placeholder, defaultValue = '', confirmLabel = 'OK', onSubmit, variant = 'secondary', className }: { label: ReactNode; placeholder?: string; defaultValue?: string; confirmLabel?: string; onSubmit: (v: string) => void; variant?: Variant; className?: string }) {
+  const [open, setOpen] = useState(false);
+  const [v, setV] = useState(defaultValue);
+  if (!open) return <Button variant={variant} className={className} onClick={() => { setV(defaultValue); setOpen(true); }}>{label}</Button>;
+  return (
+    <span className="inline-flex items-center gap-1">
+      <input autoFocus className="w-32 rounded-md border border-slate-300 px-2 py-1 text-sm" placeholder={placeholder} value={v} onChange={(e) => setV(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter' && v.trim()) { onSubmit(v.trim()); setOpen(false); } if (e.key === 'Escape') setOpen(false); }} />
+      <Button disabled={!v.trim()} onClick={() => { onSubmit(v.trim()); setOpen(false); }}>{confirmLabel}</Button>
+      <Button variant="ghost" onClick={() => setOpen(false)}>✕</Button>
+    </span>
+  );
+}

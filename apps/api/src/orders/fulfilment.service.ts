@@ -10,6 +10,8 @@ import { SequenceService } from '../core/sequence.service';
 import { AuditService } from '../core/audit.service';
 import { ScopeService } from '../core/scope.service';
 import { OrderStateService } from './order-state.service';
+import { JobsService } from '../jobs/jobs.service';
+import { CollectionsService } from '../field/collections.service';
 
 interface BatchRow {
   id: string;
@@ -47,6 +49,8 @@ export class FulfilmentService {
     private readonly audit: AuditService,
     private readonly scope: ScopeService,
     private readonly state: OrderStateService,
+    private readonly jobs: JobsService,
+    private readonly collections: CollectionsService,
   ) {}
 
   /** Where this order's stock comes from — decided by the RTM model row, not by code paths. */
@@ -96,6 +100,7 @@ export class FulfilmentService {
 
     const invLines: Omit<InvoiceLine, 'id' | 'invoiceId'>[] = [];
     const lineUpdates: { id: string; paid: number; free: number }[] = [];
+    const usages: { schemeId: string; productId: string; kind: string; costPaise: bigint; qty: number }[] = [];
 
     for (const line of order.lines) {
       const paidLeft = line.qty - line.qtyInvoiced;
@@ -118,9 +123,16 @@ export class FulfilmentService {
       const freeTaken = free.reduce((a, p) => a + p.qty, 0);
       if (paidTaken + freeTaken === 0) continue;
 
-      const thisTaxable =
-        cumulative(line.taxablePaise, line.qtyInvoiced + paidTaken, line.qty) -
-        cumulative(line.taxablePaise, line.qtyInvoiced, line.qty);
+      const portion = (amount: bigint | number) =>
+        cumulative(BigInt(amount), line.qtyInvoiced + paidTaken, line.qty) - cumulative(BigInt(amount), line.qtyInvoiced, line.qty);
+      const thisTaxable = portion(line.taxablePaise);
+      const thisMargin = portion(line.marginDiscPaise);
+      const thisScheme = portion(line.schemeDiscPaise);
+      // Scheme cost evidence for budgets and claims: discounts in proportion to invoiced units, free goods at base price.
+      for (const a of line.appliedSchemes as unknown as { schemeId: string; type: string; discountPaise: number }[]) {
+        if (a.discountPaise > 0 && paidTaken > 0) usages.push({ schemeId: a.schemeId, productId: line.productId, kind: 'DISCOUNT', costPaise: BigInt(portion(a.discountPaise)), qty: paidTaken });
+        if (a.type === 'FREE_GOODS' && freeTaken > 0) usages.push({ schemeId: a.schemeId, productId: line.productId, kind: 'FREE_GOODS', costPaise: line.unitPricePaise * BigInt(freeTaken), qty: freeTaken });
+      }
 
       const perBatch = new Map<string, { batch: BatchRow; paid: number; free: number }>();
       for (const p of paid) perBatch.set(p.batch.id, { batch: p.batch, paid: p.qty, free: 0 });
@@ -131,6 +143,8 @@ export class FulfilmentService {
       }
       const rows = [...perBatch.values()];
       const parts = allocate(thisTaxable, rows.map((r) => r.paid));
+      const marginParts = allocate(thisMargin, rows.map((r) => r.paid));
+      const schemeParts = allocate(thisScheme, rows.map((r) => r.paid));
       rows.forEach((r, k) => {
         const g = gstFor(parts[k], line.gstRateBp, order.isInterState);
         invLines.push({
@@ -147,6 +161,8 @@ export class FulfilmentService {
           sgstPaise: BigInt(g.sgstPaise),
           igstPaise: BigInt(g.igstPaise),
           totalPaise: BigInt(parts[k] + g.taxPaise),
+          marginDiscPaise: BigInt(marginParts[k]),
+          schemeDiscPaise: BigInt(schemeParts[k]),
         });
       });
       lineUpdates.push({ id: line.id, paid: paidTaken, free: freeTaken });
@@ -245,6 +261,18 @@ export class FulfilmentService {
       })),
     });
 
+    if (usages.length) {
+      await tx.schemeUsage.createMany({
+        data: usages.map((u) => ({ ...u, tenantId: order.tenantId, distributorId: distributor.id, outletId: outlet.id, invoiceId, docType: 'INVOICE', docId: invoiceId, at: now })),
+      });
+    }
+    await this.jobs.enqueue(tx, 'gst.einvoice', { invoiceId }, { key: `gst.einvoice:${invoiceId}`, tenantId: order.tenantId });
+    await this.jobs.enqueue(tx, 'integrations.erp', { event: 'INVOICE_ISSUED', invoiceId }, { key: `erp:INVOICE_ISSUED:${invoiceId}`, tenantId: order.tenantId });
+    // Key accounts (MT / e-com / q-com) ship through a 3PL; GT goes on the distributor's own vehicles.
+    if (['MT', 'ECOM', 'QCOM'].includes(order.channelCode) && !opts.autoDeliver) {
+      await this.jobs.enqueue(tx, 'integrations.shipment', { invoiceId }, { key: `shipment:${invoiceId}`, tenantId: order.tenantId });
+    }
+
     const lines = await tx.orderLine.findMany({ where: { orderId } });
     const complete = lines.every((l) => l.qtyInvoiced >= l.qty && l.freeInvoiced >= l.freeQty);
     await this.state.transition(
@@ -260,6 +288,7 @@ export class FulfilmentService {
     }
     if (complete && opts.autoDeliver) {
       await this.state.transition(tx, order.id, 'FULFILLED', 'CLOSED', actor.userId, 'Delivered on the spot');
+      await this.creditCashback(tx, actor, order.id);
     }
     await this.audit.record(tx, actor, 'INVOICE_ISSUED', 'Invoice', invoiceId, {
       after: { invoiceNo, orderNo: order.orderNo, total: invoice.totalPaise, lines: invLines.length, complete },
@@ -267,7 +296,33 @@ export class FulfilmentService {
     return invoice;
   }
 
-  async deliver(tx: Tx, actor: AuthUser, deliveryId: string, podNote?: string) {
+  /**
+   * Cashback earned on an order is credited when it closes, pro rata to what was actually invoiced
+   * (a short-closed order earns less). Financial credit, no GST adjustment; recorded as scheme cost.
+   */
+  async creditCashback(tx: Tx, actor: AuthUser, orderId: string) {
+    const order = await tx.order.findUniqueOrThrow({ where: { id: orderId }, include: { lines: true, invoices: { where: { status: 'ISSUED' } } } });
+    if (order.cashbackPaise <= 0n || order.invoices.length === 0) return;
+    if (await tx.journal.findFirst({ where: { docType: 'CASHBACK', docId: order.id } })) return;
+    const invoiced = order.invoices.reduce((a, i) => a + i.taxablePaise, 0n);
+    const amount = order.taxablePaise > 0n ? (order.cashbackPaise * invoiced) / order.taxablePaise : 0n;
+    if (amount <= 0n) return;
+    const outlet = await tx.outlet.findUniqueOrThrow({ where: { id: order.outletId } });
+    await this.ledger.post(tx, {
+      tenantId: order.tenantId, bookOwner: order.distributorId, docType: 'CASHBACK', docId: order.id, postedById: actor.userId,
+      narration: `Cashback on ${order.orderNo} credited to ${outlet.name}`,
+      lines: [{ account: Accounts.cashbackExpense, debit: amount }, { account: Accounts.receivable(outlet.id, outlet.name), credit: amount }],
+    });
+    const scheme = order.lines.flatMap((l) => l.appliedSchemes as unknown as { schemeId: string; type: string }[]).find((a) => a.type === 'CASHBACK');
+    if (scheme) {
+      await tx.schemeUsage.create({
+        data: { tenantId: order.tenantId, schemeId: scheme.schemeId, distributorId: order.distributorId, outletId: outlet.id, invoiceId: order.invoices[0].id, kind: 'CASHBACK', costPaise: amount, docType: 'CASHBACK', docId: order.id },
+      });
+    }
+    await this.audit.record(tx, actor, 'CASHBACK_CREDITED', 'Order', order.id, { after: { amountPaise: amount } });
+  }
+
+  async deliver(tx: Tx, actor: AuthUser, deliveryId: string, podNote?: string, cod?: { mode: 'CASH' | 'UPI'; amountPaise: number; reference?: string }) {
     const d = await tx.delivery.findFirst({
       where: { id: deliveryId, tenantId: actor.tenantId },
       include: { invoice: { include: { order: true } } },
@@ -275,6 +330,11 @@ export class FulfilmentService {
     if (!d) throw notFound('Delivery');
     await this.scope.assertDistributor(tx, actor, d.invoice.distributorId);
     if (d.status !== 'DISPATCHED') throw new DomainError('NOT_DELIVERABLE', `Delivery is ${d.status}`, 409);
+    if (d.invoice.order.paymentMode === 'COD' && !cod) throw new DomainError('COD_REQUIRED', 'Cash-on-delivery order: record what was collected at the door');
+    if (cod) {
+      // Collected by whoever delivered; idempotent per delivery.
+      await this.collections.collect(tx, actor, { idempotencyKey: `cod:${d.id}`, capturedAt: new Date().toISOString(), payload: { outletId: d.invoice.outletId, distributorId: d.invoice.distributorId, ...cod } });
+    }
     await tx.delivery.update({
       where: { id: d.id },
       data: { status: 'DELIVERED', deliveredAt: new Date(), deliveredById: actor.userId, podNote },
@@ -282,7 +342,10 @@ export class FulfilmentService {
     const order = d.invoice.order;
     if (order.status === 'FULFILLED') {
       const pending = await tx.delivery.count({ where: { invoice: { orderId: order.id }, status: 'DISPATCHED' } });
-      if (pending === 0) await this.state.transition(tx, order.id, 'FULFILLED', 'CLOSED', actor.userId, 'All deliveries completed');
+      if (pending === 0) {
+        await this.state.transition(tx, order.id, 'FULFILLED', 'CLOSED', actor.userId, 'All deliveries completed');
+        await this.creditCashback(tx, actor, order.id);
+      }
     }
     await this.audit.record(tx, actor, 'DELIVERY_COMPLETED', 'Delivery', d.id, { meta: { invoiceNo: d.invoice.invoiceNo, podNote } });
   }
@@ -359,6 +422,19 @@ export class FulfilmentService {
     });
     await tx.invoice.update({ where: { id: inv.id }, data: { status: 'CANCELLED' } });
     await tx.delivery.updateMany({ where: { invoiceId: inv.id }, data: { status: 'CANCELLED' } });
+    // Scheme cost for a cancelled invoice is reversed, so claims can't count it.
+    const used = await tx.schemeUsage.groupBy({ by: ['schemeId', 'productId', 'kind'], where: { invoiceId: inv.id }, _sum: { costPaise: true, qty: true } });
+    const reversals = used.filter((u) => (u._sum.costPaise ?? 0n) !== 0n);
+    if (reversals.length) {
+      await tx.schemeUsage.createMany({
+        data: reversals.map((u) => ({
+          tenantId: inv.tenantId, schemeId: u.schemeId, distributorId: inv.distributorId, outletId: inv.outletId, invoiceId: inv.id, productId: u.productId,
+          kind: u.kind, costPaise: -(u._sum.costPaise ?? 0n), qty: -(u._sum.qty ?? 0), docType: 'CREDIT_NOTE', docId: cnId,
+        })),
+      });
+    }
+    await this.jobs.enqueue(tx, 'gst.cancel', { invoiceId: inv.id, reason }, { key: `gst.cancel:${inv.id}`, tenantId: inv.tenantId });
+    await this.jobs.enqueue(tx, 'gst.creditnote', { creditNoteId: cnId }, { key: `gst.creditnote:${cnId}`, tenantId: inv.tenantId });
     await this.audit.record(tx, actor, 'INVOICE_CANCELLED', 'Invoice', inv.id, {
       before: { status: 'ISSUED' },
       after: { status: 'CANCELLED', creditNoteNo },

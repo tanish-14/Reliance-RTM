@@ -31,6 +31,12 @@ export class SequenceService {
     return `${distCode}/CN${fy}/${pad(await this.next(tx, tenantId, `CN:${distCode}:${fy}`), 4)}`;
   }
 
+  /** Debit note: per supplier per FY, e.g. MH01/DN2627/0001 (16 chars). */
+  async debitNoteNo(tx: Tx, tenantId: string, distCode: string, at = new Date()) {
+    const fy = financialYear(at);
+    return `${distCode}/DN${fy}/${pad(await this.next(tx, tenantId, `DN:${distCode}:${fy}`), 4)}`;
+  }
+
   /** Tenant-wide operational numbers: SO2627-000001, RT2627-00001, RC2627-000001. */
   async opNo(tx: Tx, tenantId: string, kind: 'SO' | 'RT' | 'RC', at = new Date()) {
     const fy = financialYear(at);

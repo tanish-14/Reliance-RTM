@@ -11,7 +11,8 @@ import { AttendanceService } from '../field/attendance.service';
 import { CollectionsService } from '../field/collections.service';
 import { ReturnsService } from '../field/returns.service';
 
-const FIELD_ROLES = new Set(['DSR']);
+/** Which roles may sync which transaction types (retailers place eB2B orders through the same pipe). */
+const ALLOWED: Record<string, string[]> = { DSR: ['ATTENDANCE', 'VISIT', 'ORDER', 'COLLECTION', 'RETURN'], RETAILER: ['ORDER'] };
 
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
@@ -58,8 +59,11 @@ export class SyncService {
     const key = m.idempotencyKey;
     const hash = createHash('sha256').update(stable({ type: m.type, capturedAt: m.capturedAt, payload: m.payload })).digest('hex');
 
-    if (!FIELD_ROLES.has(user.role)) {
-      return { idempotencyKey: key, status: 'REJECTED', error: { code: 'FORBIDDEN', message: 'Only field users sync transactions' } };
+    if (!ALLOWED[user.role]?.includes(m.type)) {
+      return { idempotencyKey: key, status: 'REJECTED', error: { code: 'FORBIDDEN', message: `${user.role} cannot sync ${m.type}` } };
+    }
+    if (user.role === 'RETAILER' && !(await this.hasOrderConsent(user))) {
+      return { idempotencyKey: key, status: 'REJECTED', error: { code: 'CONSENT_REQUIRED', message: 'Accept the privacy notice (order processing) before ordering' } };
     }
     if (!key.startsWith(`${deviceId}:`)) {
       return { idempotencyKey: key, status: 'REJECTED', error: { code: 'BAD_KEY', message: 'Idempotency key must be deviceId:localId' } };
@@ -97,6 +101,12 @@ export class SyncService {
       this.log.error({ err: e, key }, 'sync mutation failed; device will retry');
       return { idempotencyKey: key, status: 'RETRY', error: { code: 'TRANSIENT', message: 'Temporary server problem' } };
     }
+  }
+
+  /** DPDP: retailers must have consented to order processing (latest consent row wins). */
+  private async hasOrderConsent(user: AuthUser) {
+    const c = await this.prisma.consent.findFirst({ where: { tenantId: user.tenantId, subjectId: user.userId, purpose: 'ORDER_PROCESSING' }, orderBy: { at: 'desc' } });
+    return c?.granted === true;
   }
 
   private replay(row: SyncInbox, hash: string, user: AuthUser): SyncResult {

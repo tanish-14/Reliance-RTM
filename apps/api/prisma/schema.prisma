@@ -19,6 +19,8 @@ enum Role {
   DISTRIBUTOR
   DSR
   RETAILER
+  /// Non-login actor for partner integrations (inactive, random password).
+  SYSTEM
 }
 
 model Tenant {
@@ -31,7 +33,7 @@ model Tenant {
 /// Field hierarchy lives here too: DSR -> ASM -> RSM -> HQ via managerId; hierarchyPath is a
 /// materialised path ("/hq/rsm-w/asm-mum/") used for "me and everything under me" scoping.
 model User {
-  id            String    @id @default(cuid())
+  id            String       @id @default(cuid())
   tenantId      String
   email         String
   name          String
@@ -39,16 +41,19 @@ model User {
   passwordHash  String
   role          Role
   title         String?
-  active        Boolean   @default(true)
+  active        Boolean      @default(true)
   managerId     String?
-  manager       User?     @relation("Reports", fields: [managerId], references: [id])
-  reports       User[]    @relation("Reports")
+  manager       User?        @relation("Reports", fields: [managerId], references: [id])
+  reports       User[]       @relation("Reports")
   hierarchyPath String
+  /// TOTP (RFC 6238) secret, base32. Required for MANAGER / ADMIN when MFA is on.
+  mfaSecret     String?
+  mfaEnabled    Boolean   @default(false)
   distributorId String?
   distributor   Distributor? @relation(fields: [distributorId], references: [id])
   outletId      String?
-  outlet        Outlet?   @relation(fields: [outletId], references: [id])
-  createdAt     DateTime  @default(now())
+  outlet        Outlet?      @relation(fields: [outletId], references: [id])
+  createdAt     DateTime     @default(now())
   beats         Beat[]
 
   @@unique([tenantId, email])
@@ -56,21 +61,21 @@ model User {
 }
 
 model Channel {
-  id                    String  @id @default(cuid())
-  tenantId              String
-  code                  String
-  name                  String
+  id                   String   @id @default(cuid())
+  tenantId             String
+  code                 String
+  name                 String
   /// Minimum remaining shelf life (days) a batch must have to be allocated to this channel.
-  minResidualShelfDays  Int     @default(0)
-  config                Json    @default("{}")
-  outlets               Outlet[]
+  minResidualShelfDays Int      @default(0)
+  config               Json     @default("{}")
+  outlets              Outlet[]
 
   @@unique([tenantId, code])
 }
 
 /// Delivery model as data. The order engine reads these columns; adding a model is a row, not code.
 model RtmModel {
-  id                  String  @id @default(cuid())
+  id                  String          @id @default(cuid())
   tenantId            String
   code                String
   name                String
@@ -79,9 +84,9 @@ model RtmModel {
   /// ON_DISPATCH | ON_ORDER
   invoiceTiming       String
   /// Fulfil + deliver in the same transaction as order capture (van sales).
-  autoFulfil          Boolean @default(false)
-  requiresCreditCheck Boolean @default(true)
-  config              Json    @default("{}")
+  autoFulfil          Boolean         @default(false)
+  requiresCreditCheck Boolean         @default(true)
+  config              Json            @default("{}")
   services            OutletService[]
   orders              Order[]
 
@@ -89,7 +94,7 @@ model RtmModel {
 }
 
 model Distributor {
-  id            String   @id @default(cuid())
+  id            String          @id @default(cuid())
   tenantId      String
   code          String
   name          String
@@ -102,7 +107,7 @@ model Distributor {
   tier          String?
   /// hierarchyPath of the ASM responsible — managers see distributors under their path.
   hierarchyPath String
-  active        Boolean  @default(true)
+  active        Boolean         @default(true)
   users         User[]
   locations     StockLocation[]
   beats         Beat[]
@@ -112,10 +117,10 @@ model Distributor {
 }
 
 model StockLocation {
-  id            String      @id @default(cuid())
+  id            String           @id @default(cuid())
   tenantId      String
   distributorId String
-  distributor   Distributor @relation(fields: [distributorId], references: [id])
+  distributor   Distributor      @relation(fields: [distributorId], references: [id])
   code          String
   name          String
   /// WAREHOUSE | VAN
@@ -138,10 +143,10 @@ model Brand {
 }
 
 model Product {
-  id            String   @id @default(cuid())
+  id            String          @id @default(cuid())
   tenantId      String
   brandId       String
-  brand         Brand    @relation(fields: [brandId], references: [id])
+  brand         Brand           @relation(fields: [brandId], references: [id])
   code          String
   name          String
   category      String
@@ -151,7 +156,7 @@ model Product {
   gstRateBp     Int
   mrpPaise      BigInt
   shelfLifeDays Int
-  active        Boolean  @default(true)
+  active        Boolean         @default(true)
   priceItems    PriceListItem[]
 
   @@unique([tenantId, code])
@@ -217,13 +222,14 @@ model Scheme {
   brandIds     String[]
   rules        Json
   priority     Int      @default(0)
+  description  String?
   budgetPaise  BigInt?
 
   @@unique([tenantId, code])
 }
 
 model Outlet {
-  id        String   @id @default(cuid())
+  id        String          @id @default(cuid())
   tenantId  String
   code      String
   name      String
@@ -231,15 +237,15 @@ model Outlet {
   phone     String
   gstin     String?
   channelId String
-  channel   Channel  @relation(fields: [channelId], references: [id])
+  channel   Channel         @relation(fields: [channelId], references: [id])
   tier      String?
   stateCode String
   city      String
   address   String
   lat       Float
   lng       Float
-  geofenceM Int      @default(150)
-  active    Boolean  @default(true)
+  geofenceM Int             @default(150)
+  active    Boolean         @default(true)
   services  OutletService[]
   beats     BeatOutlet[]
   users     User[]
@@ -303,6 +309,12 @@ model CreditAccount {
   blocked       Boolean @default(false)
   blockReason   String?
 
+  /// Set and cleared by the credit review job (overdue / bounces). Manual blocks are left alone.
+  autoBlocked      Boolean @default(false)
+  bounceCount      Int     @default(0)
+  /// Days past due after which credit is auto-blocked.
+  overdueGraceDays Int     @default(15)
+
   @@unique([outletId, distributorId])
 }
 
@@ -347,7 +359,7 @@ model DocSequence {
 }
 
 model Order {
-  id               String      @id @default(cuid())
+  id               String       @id @default(cuid())
   tenantId         String
   orderNo          String
   /// DSR | EB2B | MT_FEED | ECOM_FEED | QCOM_FEED
@@ -355,14 +367,14 @@ model Order {
   outletId         String
   distributorId    String
   rtmModelId       String
-  rtmModel         RtmModel    @relation(fields: [rtmModelId], references: [id])
+  rtmModel         RtmModel     @relation(fields: [rtmModelId], references: [id])
   channelCode      String
   placedById       String
   status           String
   flags            String[]
   capturedAt       DateTime
   pricedAt         DateTime
-  receivedAt       DateTime    @default(now())
+  receivedAt       DateTime     @default(now())
   grossPaise       BigInt
   marginDiscPaise  BigInt
   schemeDiscPaise  BigInt
@@ -373,8 +385,11 @@ model Order {
   isInterState     Boolean
   /// Sync idempotency key (+ split index when an order is split across RTM models).
   sourceKey        String?
+  /// CREDIT | COD | ONLINE (prepaid) — how the retailer will pay
+  paymentMode      String       @default("CREDIT")
+  cashbackPaise    BigInt       @default(0)
   notes            String?
-  updatedAt        DateTime    @updatedAt
+  updatedAt        DateTime     @updatedAt
   lines            OrderLine[]
   events           OrderEvent[]
   invoices         Invoice[]
@@ -386,24 +401,24 @@ model Order {
 }
 
 model OrderLine {
-  id               String  @id @default(cuid())
-  orderId          String
-  order            Order   @relation(fields: [orderId], references: [id])
-  productId        String
-  qty              Int
-  freeQty          Int     @default(0)
-  qtyInvoiced      Int     @default(0)
-  freeInvoiced     Int     @default(0)
-  unitPricePaise   BigInt
-  grossPaise       BigInt
-  marginBp         Int
-  marginDiscPaise  BigInt
-  schemeDiscPaise  BigInt
-  taxablePaise     BigInt
-  gstRateBp        Int
-  taxPaise         BigInt
-  totalPaise       BigInt
-  appliedSchemes   Json
+  id              String @id @default(cuid())
+  orderId         String
+  order           Order  @relation(fields: [orderId], references: [id])
+  productId       String
+  qty             Int
+  freeQty         Int    @default(0)
+  qtyInvoiced     Int    @default(0)
+  freeInvoiced    Int    @default(0)
+  unitPricePaise  BigInt
+  grossPaise      BigInt
+  marginBp        Int
+  marginDiscPaise BigInt
+  schemeDiscPaise BigInt
+  taxablePaise    BigInt
+  gstRateBp       Int
+  taxPaise        BigInt
+  totalPaise      BigInt
+  appliedSchemes  Json
 }
 
 model OrderEvent {
@@ -441,6 +456,15 @@ model Invoice {
   issuedAt      DateTime      @default(now())
   dueDate       DateTime
   journalId     String
+  /// PENDING | GENERATED | NOT_APPLICABLE (B2C) | FAILED | CANCELLED
+  irnStatus     String        @default("PENDING")
+  ackNo         String?
+  ackDate       DateTime?
+  signedQr      String?
+  /// NOT_REQUIRED | PENDING | GENERATED | FAILED | CANCELLED
+  ewbStatus     String        @default("NOT_REQUIRED")
+  ewbNo         String?
+  ewbValidUntil DateTime?
   lines         InvoiceLine[]
   deliveries    Delivery[]
 
@@ -448,22 +472,24 @@ model Invoice {
 }
 
 model InvoiceLine {
-  id             String  @id @default(cuid())
-  invoiceId      String
-  invoice        Invoice @relation(fields: [invoiceId], references: [id])
-  orderLineId    String
-  productId      String
-  batchId        String
-  qty            Int
-  freeQty        Int
-  hsnCode        String
-  unitPricePaise BigInt
-  taxablePaise   BigInt
-  gstRateBp      Int
-  cgstPaise      BigInt
-  sgstPaise      BigInt
-  igstPaise      BigInt
-  totalPaise     BigInt
+  id              String  @id @default(cuid())
+  invoiceId       String
+  invoice         Invoice @relation(fields: [invoiceId], references: [id])
+  orderLineId     String
+  productId       String
+  batchId         String
+  qty             Int
+  freeQty         Int
+  hsnCode         String
+  unitPricePaise  BigInt
+  taxablePaise    BigInt
+  gstRateBp       Int
+  cgstPaise       BigInt
+  sgstPaise       BigInt
+  igstPaise       BigInt
+  marginDiscPaise BigInt  @default(0)
+  schemeDiscPaise BigInt  @default(0)
+  totalPaise      BigInt
 }
 
 model Delivery {
@@ -494,28 +520,42 @@ model CreditNote {
   taxPaise      BigInt
   totalPaise    BigInt
   journalId     String
+  irn           String?
+  irnStatus     String   @default("PENDING")
+  ackNo         String?
   issuedAt      DateTime @default(now())
 
   @@unique([tenantId, creditNoteNo])
 }
 
 model Payment {
-  id             String   @id @default(cuid())
-  tenantId       String
-  receiptNo      String
-  distributorId  String
-  outletId       String
+  id               String    @id @default(cuid())
+  tenantId         String
+  receiptNo        String
+  distributorId    String
+  outletId         String
   /// CASH | UPI (Phase 4: CHEQUE, ONLINE, BANK_TRANSFER)
-  mode           String
-  amountPaise    BigInt
+  mode             String
+  amountPaise      BigInt
   /// RECEIVED | PENDING_VERIFICATION | VERIFIED | FAILED
-  status         String
-  reference      String?
-  collectedById  String
-  capturedAt     DateTime
-  sourceKey      String?
-  journalId      String
-  createdAt      DateTime @default(now())
+  status           String
+  reference        String?
+  collectedById    String
+  capturedAt       DateTime
+  sourceKey        String?
+  journalId        String
+  gateway          String?
+  gatewayPaymentId String?   @unique
+  intentId         String?
+  chequeNo         String?
+  chequeBank       String?
+  chequeDate       DateTime?
+  depositedAt      DateTime?
+  clearedAt        DateTime?
+  bouncedAt        DateTime?
+  failureReason    String?
+  verifiedAt       DateTime?
+  createdAt        DateTime  @default(now())
 
   @@unique([tenantId, receiptNo])
   @@unique([tenantId, sourceKey])
@@ -543,31 +583,31 @@ model Return {
 }
 
 model ReturnLine {
-  id               String @id @default(cuid())
-  returnId         String
-  return           Return @relation(fields: [returnId], references: [id])
-  productId        String
-  qty              Int
+  id              String  @id @default(cuid())
+  returnId        String
+  return          Return  @relation(fields: [returnId], references: [id])
+  productId       String
+  qty             Int
   /// SALEABLE | DAMAGED | EXPIRED
-  condition        String
-  batchCode        String?
-  unitCreditPaise  BigInt?
+  condition       String
+  batchCode       String?
+  unitCreditPaise BigInt?
 }
 
 model Attendance {
-  id        String   @id @default(cuid())
-  tenantId  String
-  userId    String
-  beatId    String?
-  kind      String
+  id         String   @id @default(cuid())
+  tenantId   String
+  userId     String
+  beatId     String?
+  kind       String
   capturedAt DateTime
-  lat       Float
-  lng       Float
-  accuracyM Float?
-  distanceM Int?
-  flags     String[]
-  sourceKey String
-  createdAt DateTime @default(now())
+  lat        Float
+  lng        Float
+  accuracyM  Float?
+  distanceM  Int?
+  flags      String[]
+  sourceKey  String
+  createdAt  DateTime @default(now())
 
   @@unique([tenantId, sourceKey])
   @@index([tenantId, userId, capturedAt])
@@ -616,7 +656,7 @@ model SecondarySale {
 }
 
 model LedgerAccount {
-  id        String  @id @default(cuid())
+  id        String        @id @default(cuid())
   tenantId  String
   /// Whose books: a distributor id or "COMPANY".
   bookOwner String
@@ -712,4 +752,338 @@ model AuditLog {
 
   @@index([tenantId, entityType, entityId])
   @@index([tenantId, at])
+}
+
+/// Bulk import run (products / distributors / outlets / prices). All-or-nothing per run.
+model ImportJob {
+  id          String   @id @default(cuid())
+  tenantId    String
+  entity      String
+  dryRun      Boolean
+  /// VALID | INVALID | APPLIED
+  status      String
+  totalRows   Int
+  okRows      Int
+  errors      Json     @default("[]")
+  createdById String
+  createdAt   DateTime @default(now())
+}
+
+/// Durable job queue + transactional outbox. Enqueued in the same transaction as the business
+/// change; a worker (pg driver) or a relay into BullMQ (bullmq driver) executes it.
+model Job {
+  id          String    @id @default(cuid())
+  tenantId    String?
+  name        String
+  payload     Json
+  /// Dedupe key: at most one job per key (e.g. "gst.einvoice:<invoiceId>").
+  key         String?   @unique
+  /// PENDING | RUNNING | DONE | FAILED | DISPATCHED
+  status      String    @default("PENDING")
+  runAt       DateTime  @default(now())
+  attempts    Int       @default(0)
+  maxAttempts Int       @default(8)
+  lastError   String?
+  lockedAt    DateTime?
+  doneAt      DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([status, runAt])
+}
+
+/// Online payment attempt (gateway order). Webhooks — not the browser — move it to PAID.
+model PaymentIntent {
+  id             String    @id @default(cuid())
+  tenantId       String
+  intentNo       String
+  outletId       String
+  distributorId  String
+  orderId        String?
+  /// ORDER (prepaid eB2B order) | OUTSTANDING (pay dues)
+  purpose        String
+  amountPaise    BigInt
+  /// CREATED | PAID | EXPIRED | CANCELLED
+  status         String    @default("CREATED")
+  gateway        String
+  gatewayOrderId String    @unique
+  paymentLinkUrl String?
+  attempts       Int       @default(0)
+  lastFailure    String?
+  expiresAt      DateTime
+  paidAt         DateTime?
+  paymentId      String?
+  createdById    String
+  createdAt      DateTime  @default(now())
+
+  @@unique([tenantId, intentNo])
+}
+
+/// Every webhook delivery, verified or not. Unique eventId makes processing idempotent.
+model GatewayEvent {
+  id             String   @id @default(cuid())
+  gateway        String
+  eventId        String   @unique
+  type           String
+  signatureValid Boolean
+  payload        Json
+  /// PROCESSED | IGNORED | FAILED | REJECTED
+  status         String
+  error          String?
+  receivedAt     DateTime @default(now())
+}
+
+model Refund {
+  id              String   @id @default(cuid())
+  tenantId        String
+  refundNo        String
+  paymentId       String
+  amountPaise     BigInt
+  /// PENDING | PROCESSED | FAILED
+  status          String
+  gatewayRefundId String?  @unique
+  reason          String
+  journalId       String?
+  createdById     String
+  createdAt       DateTime @default(now())
+
+  @@unique([tenantId, refundNo])
+}
+
+/// Day-end cash deposit by a field agent. Variance against cash-in-transit is posted explicitly.
+model CashDeposit {
+  id            String   @id @default(cuid())
+  tenantId      String
+  depositNo     String
+  distributorId String
+  agentId       String
+  expectedPaise BigInt
+  declaredPaise BigInt
+  variancePaise BigInt
+  bankRef       String
+  slipDate      DateTime
+  /// SUBMITTED | BANK_MATCHED | SHORT | EXCESS
+  status        String
+  journalId     String
+  bankLineId    String?
+  createdById   String
+  createdAt     DateTime @default(now())
+
+  @@unique([tenantId, depositNo])
+}
+
+model BankStatementLine {
+  id          String   @id @default(cuid())
+  tenantId    String
+  /// The distributor (or COMPANY) whose bank account this is.
+  bookOwner   String
+  valueDate   DateTime
+  /// Positive = credit to the account.
+  amountPaise BigInt
+  reference   String
+  narration   String
+  /// UNMATCHED | MATCHED | EXCEPTION | IGNORED
+  status      String   @default("UNMATCHED")
+  matchedType String?
+  matchedId   String?
+  importBatch String
+  createdAt   DateTime @default(now())
+
+  @@unique([tenantId, bookOwner, reference, amountPaise, valueDate])
+  @@index([tenantId, bookOwner, status])
+}
+
+/// Append-only scheme cost evidence, written at invoice (+) and at cancellation / correction (-).
+/// Claims and scheme budgets are validated against this — i.e. against actual secondary sales.
+model SchemeUsage {
+  id            String   @id @default(cuid())
+  tenantId      String
+  schemeId      String
+  distributorId String
+  outletId      String
+  invoiceId     String
+  invoiceLineId String?
+  productId     String?
+  /// DISCOUNT | FREE_GOODS | CASHBACK
+  kind          String
+  costPaise     BigInt
+  qty           Int      @default(0)
+  docType       String
+  docId         String
+  at            DateTime @default(now())
+
+  @@index([tenantId, schemeId, distributorId, at])
+  @@index([invoiceId])
+}
+
+model Claim {
+  id             String    @id @default(cuid())
+  tenantId       String
+  claimNo        String
+  distributorId  String
+  schemeId       String
+  periodFrom     DateTime
+  periodTo       DateTime
+  claimedPaise   BigInt
+  validatedPaise BigInt    @default(0)
+  approvedPaise  BigInt    @default(0)
+  /// VALIDATED | PARTIALLY_VALIDATED | APPROVED | REJECTED | SETTLED
+  status         String
+  flags          String[]
+  evidence       Json      @default("{}")
+  dedupeKey      String    @unique
+  submittedById  String
+  decidedById    String?
+  decidedAt      DateTime?
+  settledAt      DateTime?
+  journalId      String?
+  notes          String?
+  createdAt      DateTime  @default(now())
+
+  @@unique([tenantId, claimNo])
+  @@index([tenantId, distributorId, schemeId])
+}
+
+/// Debit note (e.g. a scheme applied in error is recovered from the outlet).
+model DebitNote {
+  id            String   @id @default(cuid())
+  tenantId      String
+  debitNoteNo   String
+  reason        String
+  distributorId String
+  outletId      String
+  invoiceId     String?
+  taxablePaise  BigInt
+  taxPaise      BigInt
+  totalPaise    BigInt
+  journalId     String
+  createdById   String
+  issuedAt      DateTime @default(now())
+
+  @@unique([tenantId, debitNoteNo])
+}
+
+/// Outcome of each outbound integration delivery (ERP, logistics, marketplace).
+model IntegrationLog {
+  id          String   @id @default(cuid())
+  target      String
+  event       String
+  refId       String
+  status      String
+  externalRef String?
+  detail      Json     @default("{}")
+  at          DateTime @default(now())
+
+  @@index([target, at])
+}
+
+/// A trading partner sending orders (modern trade buyer, marketplace, quick-commerce).
+/// The payload shape is configuration (field paths), so a new partner is data, not code.
+model PartnerIntegration {
+  id            String   @id @default(cuid())
+  tenantId      String
+  code          String
+  name          String
+  channelCode   String
+  /// GENERIC_JSON (field-path mapping) — the only adapter needed so far.
+  adapter       String   @default("GENERIC_JSON")
+  /// { refPath, storePath, linesPath, skuPath, qtyPath, qtyUnit: EACH|CASE, totalPath?, totalUnit?: RUPEES|PAISE }
+  config        Json
+  apiKeyHash    String
+  /// HMAC-SHA256 secret for X-Partner-Signature over the raw body.
+  signingSecret String
+  systemUserId  String
+  active        Boolean  @default(true)
+  createdAt     DateTime @default(now())
+
+  @@unique([tenantId, code])
+}
+
+model PartnerOutlet {
+  id              String @id @default(cuid())
+  partnerId       String
+  externalStoreId String
+  outletId        String
+
+  @@unique([partnerId, externalStoreId])
+}
+
+model PartnerSku {
+  id          String @id @default(cuid())
+  partnerId   String
+  externalSku String
+  productId   String
+
+  @@unique([partnerId, externalSku])
+}
+
+/// Every inbound partner order, accepted or not. Unique (partner, externalRef) = idempotent intake.
+model ExternalOrder {
+  id          String   @id @default(cuid())
+  tenantId    String
+  partnerId   String
+  externalRef String
+  payload     Json
+  /// ACCEPTED | REJECTED
+  status      String
+  orderNos    String[]
+  error       String?
+  receivedAt  DateTime @default(now())
+
+  @@unique([partnerId, externalRef])
+}
+
+/// Maker-checker approvals. Required level comes from the amount; approver must outrank it in scope.
+model Approval {
+  id            String    @id @default(cuid())
+  tenantId      String
+  /// SCHEME_ACTIVATION | CREDIT_LIMIT | CLAIM_APPROVAL
+  kind          String
+  refType       String
+  refId         String
+  distributorId String?
+  title         String
+  amountPaise   BigInt?
+  payload       Json      @default("{}")
+  requiredLevel Int
+  requestedById String
+  /// PENDING | APPROVED | REJECTED | CANCELLED
+  status        String    @default("PENDING")
+  decidedById   String?
+  decidedAt     DateTime?
+  note          String?
+  createdAt     DateTime  @default(now())
+
+  @@index([tenantId, status])
+}
+
+/// DPDP consent log — append-only; the latest row per (subject, purpose) is the current state.
+model Consent {
+  id            String   @id @default(cuid())
+  tenantId      String
+  subjectId     String
+  purpose       String
+  granted       Boolean
+  noticeVersion String
+  source        String
+  at            DateTime @default(now())
+
+  @@index([tenantId, subjectId, purpose, at])
+}
+
+/// DPDP data-principal requests (access / correction / erasure).
+model DataRequest {
+  id           String    @id @default(cuid())
+  tenantId     String
+  subjectId    String
+  /// ACCESS | CORRECTION | ERASURE
+  type         String
+  details      String?
+  /// OPEN | COMPLETED | REJECTED
+  status       String    @default("OPEN")
+  result       Json?
+  handledById  String?
+  completedAt  DateTime?
+  createdAt    DateTime  @default(now())
+
+  @@index([tenantId, status])
 }

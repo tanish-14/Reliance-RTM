@@ -121,3 +121,38 @@ describe('allocate', () => {
     expect(parts.reduce((a, b) => a + b, 0)).toBe(1001);
   });
 });
+
+describe('Phase 4 scheme types', () => {
+  it('trade discount competes with quantity slabs (best wins)', () => {
+    const r = priceOrder({
+      ...base,
+      schemes: [
+        scheme({ code: 'TD', type: 'TRADE_DISCOUNT', brandIds: ['campa'], rules: { discountBp: 300 } }),
+        scheme({ code: 'Q', type: 'QTY_SLAB', brandIds: ['campa'], rules: { slabs: [{ minQty: 48, discountBp: 500 }] } }),
+      ],
+      lines: [{ productId: 'cola500', qty: 24 }],
+    });
+    expect(r.lines[0].appliedSchemes.map((a) => a.code)).toEqual(['TD']);
+    const r2 = priceOrder({ ...base, schemes: [scheme({ code: 'TD', type: 'TRADE_DISCOUNT', rules: { discountBp: 300 } }), scheme({ code: 'Q', type: 'QTY_SLAB', rules: { slabs: [{ minQty: 48, discountBp: 500 }] } })], lines: [{ productId: 'cola500', qty: 48 }] });
+    expect(r2.lines[0].appliedSchemes.map((a) => a.code)).toEqual(['Q']);
+  });
+
+  it('combo applies only when every component meets its minimum, and blocks value slabs on those lines', () => {
+    const combo = scheme({ code: 'C', type: 'COMBO', rules: { items: [{ productId: 'cola500', minQty: 24 }, { productId: 'atta5', minQty: 2 }], discountBp: 500 } });
+    const value = scheme({ code: 'V', type: 'VALUE_SLAB', rules: { slabs: [{ minValuePaise: 1, discountBp: 100 }] } });
+    const miss = priceOrder({ ...base, schemes: [combo], lines: [{ productId: 'cola500', qty: 24 }, { productId: 'atta5', qty: 1 }] });
+    expect(miss.schemeDiscPaise).toBe(0);
+    const hit = priceOrder({ ...base, schemes: [combo, value], lines: [{ productId: 'cola500', qty: 24 }, { productId: 'atta5', qty: 2 }] });
+    expect(hit.lines.map((l) => l.appliedSchemes.map((a) => a.code))).toEqual([['C'], ['C']]);
+    expect(hit.lines[0].schemeDiscPaise).toBe(3000);
+  });
+
+  it('cashback does not change the invoice value and is capped', () => {
+    const cb = scheme({ code: 'CB', type: 'CASHBACK', rules: { minValuePaise: 50000, cashbackBp: 200, maxPaise: 1000 } });
+    const r = priceOrder({ ...base, schemes: [cb], lines: [{ productId: 'atta5', qty: 10 }] });
+    expect(r.cashbackPaise).toBe(1000);
+    expect(r.taxablePaise).toBe(200000);
+    expect(r.lines[0].appliedSchemes[0].cashbackPaise).toBe(1000);
+    expect(priceOrder({ ...base, schemes: [cb], lines: [{ productId: 'atta5', qty: 1 }] }).cashbackPaise).toBe(0);
+  });
+});

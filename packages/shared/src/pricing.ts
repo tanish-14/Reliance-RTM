@@ -4,8 +4,9 @@ import { allocate, applyBp, sum, type Paise } from './money';
  * Pricing pipeline (identical on device and server):
  *   base price (effective-dated price list, most specific scope wins)
  *   - trade margin (most specific margin rule wins: SKU > brand > tier > channel > state)
- *   - line schemes (best QTY_SLAB per line; best FREE_GOODS per line)
- *   - order schemes (VALUE_SLAB, allocated back onto eligible lines)
+ *   - line schemes (best of QTY_SLAB / TRADE_DISCOUNT per line; best FREE_GOODS per line)
+ *   - order schemes (COMBO, then VALUE_SLAB, allocated back onto eligible lines; one per line)
+ *   - CASHBACK (credited after delivery, not a price change)
  *   = taxable value, then GST (CGST+SGST intra-state, IGST inter-state).
  * The server re-runs this as of the capture time on sync; a different total
  * than the device computed means masters changed while offline.
@@ -61,7 +62,11 @@ interface SchemeBase {
 export type SchemeDef =
   | (SchemeBase & { type: 'QTY_SLAB'; rules: { slabs: { minQty: number; discountBp: number }[] } })
   | (SchemeBase & { type: 'VALUE_SLAB'; rules: { slabs: { minValuePaise: Paise; discountBp: number }[] } })
-  | (SchemeBase & { type: 'FREE_GOODS'; rules: { buyQty: number; freeQty: number } });
+  | (SchemeBase & { type: 'FREE_GOODS'; rules: { buyQty: number; freeQty: number } })
+  | (SchemeBase & { type: 'TRADE_DISCOUNT'; rules: { discountBp: number } })
+  | (SchemeBase & { type: 'COMBO'; rules: { items: { productId: string; minQty: number }[]; discountBp: number } })
+  | (SchemeBase & { type: 'CASHBACK'; rules: { minValuePaise: Paise; cashbackBp: number; maxPaise?: Paise } });
+export const SCHEME_TYPES = ['QTY_SLAB', 'VALUE_SLAB', 'FREE_GOODS', 'TRADE_DISCOUNT', 'COMBO', 'CASHBACK'] as const;
 export type SchemeType = SchemeDef['type'];
 
 export interface PricingOutlet {
@@ -88,6 +93,8 @@ export interface AppliedScheme {
   type: SchemeType;
   discountPaise: Paise;
   freeQty: number;
+  /** CASHBACK only: this line's share of the post-delivery credit. */
+  cashbackPaise?: Paise;
 }
 
 export interface PricedLine {
@@ -117,6 +124,8 @@ export interface PricingError {
 
 export interface PricedOrder {
   at: string;
+  /** Credited after delivery (CASHBACK schemes); not part of the invoice value. */
+  cashbackPaise: Paise;
   isInterState: boolean;
   lines: PricedLine[];
   errors: PricingError[];
@@ -183,11 +192,17 @@ export function resolveMargin(
   return matches[0];
 }
 
-export function schemeEligible(s: SchemeDef, product: PricingProduct, outlet: PricingOutlet, at: string): boolean {
+/** Time-, channel- and geography-bound checks (no product scope). */
+export function schemeActive(s: SchemeDef, outlet: PricingOutlet, at: string): boolean {
   const now = t(at);
   if (!(t(s.validFrom) <= now && now <= t(s.validTo))) return false;
   if (s.channelCodes.length && !s.channelCodes.includes(outlet.channelCode)) return false;
   if (s.stateCodes.length && !s.stateCodes.includes(outlet.stateCode)) return false;
+  return true;
+}
+
+export function schemeEligible(s: SchemeDef, product: PricingProduct, outlet: PricingOutlet, at: string): boolean {
+  if (!schemeActive(s, outlet, at)) return false;
   const scoped = s.productIds.length > 0 || s.brandIds.length > 0;
   if (!scoped) return true;
   return s.productIds.includes(product.id) || s.brandIds.includes(product.brandId);
@@ -231,10 +246,12 @@ export function priceOrder(input: PricingInput): PricedOrder {
     let schemeDisc = 0;
     let bestQty: AppliedScheme | null = null;
     for (const s of eligible) {
-      if (s.type !== 'QTY_SLAB') continue;
-      const slab = bestSlab(s.rules.slabs, (sl) => qty >= sl.minQty);
-      if (!slab) continue;
-      const d = applyBp(afterMargin, slab.discountBp);
+      // Quantity slabs and flat trade discounts compete: the retailer gets the better one.
+      let bp: number | null = null;
+      if (s.type === 'QTY_SLAB') bp = bestSlab(s.rules.slabs, (sl) => qty >= sl.minQty)?.discountBp ?? null;
+      if (s.type === 'TRADE_DISCOUNT') bp = s.rules.discountBp;
+      if (bp === null) continue;
+      const d = applyBp(afterMargin, bp);
       if (!bestQty || d > bestQty.discountPaise) {
         bestQty = { schemeId: s.id, code: s.code, type: s.type, discountPaise: d, freeQty: 0 };
       }
@@ -280,8 +297,23 @@ export function priceOrder(input: PricingInput): PricedOrder {
     });
   }
 
-  // Order-level value slabs, greedily by size; each line gets at most one.
+  // Combos: every component present at its minimum quantity -> discount on the component lines.
   const covered = new Set<number>();
+  for (const s of input.schemes) {
+    if (s.type !== 'COMBO' || !schemeActive(s, outlet, at)) continue;
+    const idx = s.rules.items.map((it) => lines.findIndex((l) => l.productId === it.productId && l.qty >= it.minQty));
+    if (idx.some((i) => i < 0 || covered.has(i))) continue;
+    idx.forEach((i) => {
+      const l = lines[i];
+      const d = applyBp(l.taxablePaise, s.rules.discountBp);
+      l.schemeDiscPaise += d;
+      l.taxablePaise -= d;
+      l.appliedSchemes.push({ schemeId: s.id, code: s.code, type: 'COMBO', discountPaise: d, freeQty: 0 });
+      covered.add(i);
+    });
+  }
+
+  // Order-level value slabs, greedily by size; each line gets at most one order-level discount.
   const valueSchemes = input.schemes
     .filter((s): s is Extract<SchemeDef, { type: 'VALUE_SLAB' }> => s.type === 'VALUE_SLAB')
     .map((s) => {
@@ -318,7 +350,23 @@ export function priceOrder(input: PricingInput): PricedOrder {
     l.totalPaise = l.taxablePaise + l.taxPaise;
   }
 
+  // Cashback: not a price change — credited to the retailer after delivery (best eligible scheme).
+  let cashbackPaise = 0;
+  for (const s of input.schemes) {
+    if (s.type !== 'CASHBACK') continue;
+    const idx = lines.map((l, i) => ({ l, i })).filter(({ l }) => schemeEligible(s, input.products[l.productId], outlet, at)).map(({ i }) => i);
+    const base = sum(idx.map((i) => lines[i].taxablePaise));
+    if (base < s.rules.minValuePaise) continue;
+    const cb = Math.min(applyBp(base, s.rules.cashbackBp), s.rules.maxPaise ?? Number.MAX_SAFE_INTEGER);
+    if (cb <= cashbackPaise) continue;
+    for (const l of lines) l.appliedSchemes = l.appliedSchemes.filter((a) => a.type !== 'CASHBACK');
+    const parts = allocate(cb, idx.map((i) => lines[i].taxablePaise));
+    idx.forEach((i, k) => lines[i].appliedSchemes.push({ schemeId: s.id, code: s.code, type: 'CASHBACK', discountPaise: 0, freeQty: 0, cashbackPaise: parts[k] }));
+    cashbackPaise = cb;
+  }
+
   return {
+    cashbackPaise,
     at,
     isInterState,
     lines,

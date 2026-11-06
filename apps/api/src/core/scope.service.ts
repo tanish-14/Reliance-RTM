@@ -34,6 +34,8 @@ export class ScopeService {
       }
       case 'RETAILER':
         return [];
+      default:
+        return [];
     }
   }
 

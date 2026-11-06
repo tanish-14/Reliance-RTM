@@ -15,11 +15,12 @@ export class MastersService {
 
   async bundle(tx: Tx, user: AuthUser): Promise<MastersBundle> {
     const now = new Date();
-    const beats = await tx.beat.findMany({
-      where: { tenantId: user.tenantId, dsrId: user.userId },
-      include: { outlets: { orderBy: { sequence: 'asc' } } },
-    });
-    const outletIds = [...new Set(beats.flatMap((b) => b.outlets.map((o) => o.outletId)))];
+    // DSRs get the outlets on their beats; a retailer (eB2B) gets just their own outlet.
+    const beats =
+      user.role === 'DSR'
+        ? await tx.beat.findMany({ where: { tenantId: user.tenantId, dsrId: user.userId }, include: { outlets: { orderBy: { sequence: 'asc' } } } })
+        : [];
+    const outletIds = user.role === 'RETAILER' ? [user.outletId ?? '-'] : [...new Set(beats.flatMap((b) => b.outlets.map((o) => o.outletId)))];
     const outlets = await tx.outlet.findMany({
       where: { id: { in: outletIds }, active: true },
       include: { channel: true, services: { include: { distributor: true, rtmModel: true } } },

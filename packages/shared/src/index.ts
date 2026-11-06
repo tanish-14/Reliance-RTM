@@ -7,3 +7,4 @@ export * from './pricing';
 export * from './schemas';
 export * from './bundle';
 export * from './routing';
+export * from './admin';

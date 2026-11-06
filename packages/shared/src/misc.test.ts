@@ -51,3 +51,23 @@ describe('routeLines', () => {
     ]);
   });
 });
+
+import { OutletInput, parseCsv, outletRowToInput, ProductInput } from './admin';
+
+describe('master-data validation', () => {
+  it('parses quoted CSV with commas and escaped quotes', () => {
+    const rows = parseCsv('code,name\r\nA1,"Shop, ""Main"""\nA2,Plain\n');
+    expect(rows).toEqual([{ code: 'A1', name: 'Shop, "Main"' }, { code: 'A2', name: 'Plain' }]);
+  });
+  it('rejects a GSTIN whose state does not match the outlet state', () => {
+    const base = { code: 'OUT-X', name: 'Test', ownerName: 'Owner', phone: '9876543210', channelCode: 'GT', stateCode: '07', city: 'Delhi', address: 'Somewhere', lat: 28.6, lng: 77.2, services: [{ rtmModelCode: 'DISTRIBUTOR_LED', distributorCode: 'DL01' }] };
+    expect(OutletInput.safeParse({ ...base, gstin: '27AAPFU0939F1ZV' }).success).toBe(false);
+    expect(OutletInput.safeParse({ ...base, gstin: '27AAPFU0939F1ZV', stateCode: '27' }).success).toBe(true);
+    expect(OutletInput.safeParse(outletRowToInput({ ...base, lat: '28.6', lng: '77.2', services: 'DISTRIBUTOR_LED:DL01' } as any)).success).toBe(true);
+  });
+  it('converts rupees to paise and enforces GST slabs', () => {
+    const p = ProductInput.parse({ code: 'X-1', name: 'Thing', brandCode: 'CAMPA', category: 'Bev', packSize: '1 L', caseSize: '12', hsnCode: '2202', gstRatePct: '40', mrpRupees: '45.50', shelfLifeDays: '90' });
+    expect(p.mrpRupees).toBe(4550);
+    expect(ProductInput.safeParse({ ...p, mrpRupees: 1, gstRatePct: 7 }).success).toBe(false);
+  });
+});

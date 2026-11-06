@@ -79,11 +79,15 @@ export class PricingService {
       tx.marginRule.findMany({ where: { tenantId, active: true, OR: [{ validTo: null }, { validTo: { gt: since } }] } }),
       tx.scheme.findMany({ where: { tenantId, status: 'ACTIVE', validTo: { gt: since } } }),
     ]);
+    // A scheme whose budget is used up stops applying (server-side; devices learn on next pull).
+    const used = await tx.schemeUsage.groupBy({ by: ['schemeId'], where: { tenantId, schemeId: { in: schemes.map((s) => s.id) } }, _sum: { costPaise: true } });
+    const usedOf = new Map(used.map((u) => [u.schemeId, u._sum.costPaise ?? 0n]));
+    const live = schemes.filter((s) => s.budgetPaise === null || (usedOf.get(s.id) ?? 0n) < s.budgetPaise);
     return {
       products,
       priceLists: priceLists.map(mapPriceList),
       marginRules: marginRules.map(mapMargin),
-      schemes: schemes.map(mapScheme),
+      schemes: live.map(mapScheme),
     };
   }
 

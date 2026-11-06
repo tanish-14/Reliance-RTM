@@ -1,5 +1,5 @@
 import { z } from 'zod';
-import { COLLECTION_MODES, RETURN_CONDITIONS } from './enums';
+import { COLLECTION_MODES, PAYMENT_MODES, RETURN_CONDITIONS } from './enums';
 
 export const LoginSchema = z.object({
   tenant: z.string().min(1).default('rcpl'),
@@ -50,6 +50,8 @@ export const OrderMutation = z.object({
     /** Total the device showed the retailer; compared with the server's re-pricing. */
     clientTotalPaise: z.number().int().nonnegative(),
     notes: z.string().max(500).optional(),
+    /** CREDIT (khata), COD (pay at delivery) or ONLINE (prepaid; held until the gateway confirms). */
+    paymentMode: z.enum(PAYMENT_MODES).default('CREDIT'),
   }),
 });
 
@@ -64,6 +66,9 @@ export const CollectionMutation = z.object({
     amountPaise: z.number().int().positive(),
     /** UPI UTR / reference; required for UPI. */
     reference: z.string().max(64).optional(),
+    chequeNo: z.string().regex(/^\d{6}$/, '6-digit cheque number').optional(),
+    chequeBank: z.string().max(60).optional(),
+    chequeDate: z.string().optional(),
   }),
 });
 
@@ -125,6 +130,8 @@ export const FulfilSchema = z.object({
 
 export const DeliverSchema = z.object({
   podNote: z.string().max(200).optional(),
+  /** Cash / UPI collected at the door for a COD order. */
+  cod: z.object({ mode: z.enum(['CASH', 'UPI']), amountPaise: z.number().int().positive(), reference: z.string().max(64).optional() }).optional(),
 });
 
 export const ReviewDecisionSchema = z.object({

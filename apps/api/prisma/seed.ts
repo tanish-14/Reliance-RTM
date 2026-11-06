@@ -5,6 +5,7 @@ import 'dotenv/config';
 import { PrismaClient, Role } from '@prisma/client';
 import * as bcrypt from 'bcryptjs';
 import { makeGstin } from '@rtm/shared';
+import { createHash, randomBytes } from 'node:crypto';
 
 const prisma = new PrismaClient();
 const DAY = 86_400_000;
@@ -13,8 +14,11 @@ const days = (n: number) => new Date(now.getTime() + n * DAY);
 export const DEMO_PASSWORD = 'Rcpl@1234';
 
 async function main() {
-  if (await prisma.tenant.findUnique({ where: { code: 'rcpl' } })) {
-    console.log('Tenant "rcpl" already seeded — run `npm run db:reset` for a fresh database.');
+  const existing = await prisma.tenant.findUnique({ where: { code: 'rcpl' } });
+  if (existing) {
+    // Additive seeds for databases created by an earlier version of this script.
+    await seedPartners(existing.id);
+    console.log('Tenant "rcpl" already seeded (added anything missing) — run `npm run db:reset` for a fresh database.');
     return;
   }
   const tenant = await prisma.tenant.create({ data: { code: 'rcpl', name: 'Reliance Consumer Products Ltd' } });
@@ -276,11 +280,55 @@ async function main() {
     await user(email, name, 'RETAILER', '/retail/', { title: 'Retailer', outletId });
   }
 
+  await seedPartners(tenantId);
+
   await prisma.auditLog.create({
     data: { tenantId, actorId: 'seed', actorRole: 'SYSTEM', action: 'SEED', entityType: 'Tenant', entityId: tenantId, meta: { outlets: outletSeq + keyAcc.length, products: skuDefs.length } },
   });
   console.log(`Seeded tenant rcpl: ${skuDefs.length} SKUs, ${distDefs.length} distributors, ${outletSeq + keyAcc.length} outlets, 3 schemes, ${dsrDefs.length} DSRs.`);
   console.log(`All demo logins use password ${DEMO_PASSWORD}`);
+}
+
+/**
+ * Trading partners for MT / e-com / q-com intake. Each partner's payload shape is configuration.
+ * Demo credentials: API key "<code>-demo-key", signing secret "<code>-demo-secret" (lower-case code).
+ */
+async function seedPartners(tenantId: string) {
+  if (await prisma.partnerIntegration.count({ where: { tenantId } })) return;
+  const outlet = (code: string) => prisma.outlet.findUniqueOrThrow({ where: { tenantId_code: { tenantId, code } } });
+  const products = await prisma.product.findMany({ where: { tenantId }, orderBy: { code: 'asc' } });
+  const defs = [
+    {
+      code: 'STAR-HYPER', name: 'Star Hypermart (MT buyer EDI)', channelCode: 'MT',
+      config: { refPath: 'PONumber', storePath: 'ShipTo.StoreCode', linesPath: 'Lines', skuPath: 'EAN', qtyPath: 'Cases', qtyUnit: 'CASE', totalPath: 'POValue', totalUnit: 'RUPEES' },
+      stores: [['STAR-AND-01', 'MT-001']],
+      skus: products.map((p, i) => [`89090000000${String(i + 10)}`, p.id]),
+    },
+    {
+      code: 'SHOPKART', name: 'ShopKart marketplace', channelCode: 'ECOM',
+      config: { refPath: 'order_id', storePath: 'fc_code', linesPath: 'items', skuPath: 'sku', qtyPath: 'qty', qtyUnit: 'EACH' },
+      stores: [['BHI-FC1', 'EC-001']],
+      skus: [],
+    },
+    {
+      code: 'ZIPMART', name: 'ZipMart quick commerce', channelCode: 'QCOM',
+      config: { refPath: 'replenishment_id', storePath: 'dark_store', linesPath: 'lines', skuPath: 'item_code', qtyPath: 'units', qtyUnit: 'EACH', totalPath: 'value_paise', totalUnit: 'PAISE' },
+      stores: [['PWI-DS', 'QC-001'], ['KRM-DS', 'QC-002']],
+      skus: products.map((p) => [`ZM-${p.code.replace(/^(CAMPA|IND)-/, '')}`, p.id]),
+    },
+  ];
+  for (const d of defs) {
+    const key = d.code.toLowerCase();
+    const sys = await prisma.user.create({
+      data: { tenantId, email: `partner.${key}@system.rcpl.test`, name: `${d.name} (integration)`, role: 'SYSTEM', active: false, hierarchyPath: '/system/', passwordHash: await bcrypt.hash(randomBytes(24).toString('hex'), 4) },
+    });
+    const p = await prisma.partnerIntegration.create({
+      data: { tenantId, code: d.code, name: d.name, channelCode: d.channelCode, config: d.config as any, apiKeyHash: createHash('sha256').update(`${key}-demo-key`).digest('hex'), signingSecret: `${key}-demo-secret`, systemUserId: sys.id },
+    });
+    for (const [ext, code] of d.stores) await prisma.partnerOutlet.create({ data: { partnerId: p.id, externalStoreId: ext, outletId: (await outlet(code)).id } });
+    for (const [ext, productId] of d.skus) await prisma.partnerSku.create({ data: { partnerId: p.id, externalSku: ext, productId } });
+  }
+  console.log('Seeded 3 trading partners (STAR-HYPER, SHOPKART, ZIPMART).');
 }
 
 main()

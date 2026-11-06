@@ -5,12 +5,29 @@ import { api } from '../../lib/api';
 import { dt } from '../../lib/format';
 import { Badge, Button, Card, Empty, ErrorNote, Stat, Table, Td } from '../../components/ui';
 import { Shell } from '../../components/Shell';
+import { Approvals, Kpis } from './HqIntel';
+import { Claims, Credit, Exceptions } from '../distributor/DistributorMoney';
 
 export function HqApp() {
   return (
-    <Shell nav={[{ to: '/hq', label: 'Overview', end: true }, { to: '/hq/audit', label: 'Audit trail' }]}>
+    <Shell
+      nav={[
+        { to: '/hq', label: 'Overview', end: true },
+        { to: '/hq/kpis', label: 'Distribution & KPIs' },
+        { to: '/hq/approvals', label: 'Approvals' },
+        { to: '/hq/claims', label: 'Claims' },
+        { to: '/hq/credit', label: 'Credit' },
+        { to: '/hq/exceptions', label: 'Exceptions' },
+        { to: '/hq/audit', label: 'Audit trail' },
+      ]}
+    >
       <Routes>
         <Route index element={<Overview />} />
+        <Route path="kpis" element={<Kpis />} />
+        <Route path="approvals" element={<Approvals />} />
+        <Route path="claims" element={<Claims />} />
+        <Route path="credit" element={<Credit />} />
+        <Route path="exceptions" element={<Exceptions />} />
         <Route path="audit" element={<AuditTrail />} />
       </Routes>
     </Shell>

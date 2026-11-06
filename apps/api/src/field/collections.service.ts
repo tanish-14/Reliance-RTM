@@ -28,12 +28,13 @@ export class CollectionsService {
     m: {
       idempotencyKey: string;
       capturedAt: string;
-      payload: { outletId: string; distributorId?: string; mode: 'CASH' | 'UPI'; amountPaise: number; reference?: string };
+      payload: { outletId: string; distributorId?: string; mode: 'CASH' | 'UPI' | 'CHEQUE'; amountPaise: number; reference?: string; chequeNo?: string; chequeBank?: string; chequeDate?: string };
     },
   ) {
     const p = m.payload;
     await this.scope.assertOutlet(tx, user, p.outletId);
     if (p.mode === 'UPI' && !p.reference) throw new DomainError('UPI_REFERENCE_REQUIRED', 'UPI collections need the UTR / reference');
+    if (p.mode === 'CHEQUE' && (!p.chequeNo || !p.chequeBank)) throw new DomainError('CHEQUE_DETAILS_REQUIRED', 'Cheque number and bank are required');
     const outlet = await tx.outlet.findFirst({ where: { id: p.outletId, tenantId: user.tenantId }, include: { services: true } });
     if (!outlet) throw notFound('Outlet');
     const svc = p.distributorId
@@ -51,10 +52,10 @@ export class CollectionsService {
       bookOwner: svc.distributorId,
       docType: 'PAYMENT',
       docId: id,
-      narration: `${p.mode} ${receiptNo} from ${outlet.name}${p.reference ? ` ref ${p.reference}` : ''}`,
+      narration: `${p.mode} ${receiptNo} from ${outlet.name}${p.reference ? ` ref ${p.reference}` : ''}${p.chequeNo ? ` chq ${p.chequeNo} ${p.chequeBank}` : ''}`,
       postedById: user.userId,
       lines: [
-        { account: p.mode === 'CASH' ? Accounts.cashInTransit(user.userId, user.name) : Accounts.upiClearing, debit: amount },
+        { account: p.mode === 'CASH' ? Accounts.cashInTransit(user.userId, user.name) : p.mode === 'CHEQUE' ? Accounts.chequesInHand : Accounts.upiClearing, debit: amount },
         { account: Accounts.receivable(outlet.id, outlet.name), credit: amount },
       ],
     });
@@ -67,8 +68,11 @@ export class CollectionsService {
         outletId: outlet.id,
         mode: p.mode,
         amountPaise: amount,
-        status: p.mode === 'CASH' ? 'RECEIVED' : 'PENDING_VERIFICATION',
+        status: p.mode === 'UPI' ? 'PENDING_VERIFICATION' : 'RECEIVED',
         reference: p.reference,
+        chequeNo: p.chequeNo,
+        chequeBank: p.chequeBank,
+        chequeDate: p.chequeDate ? new Date(p.chequeDate) : undefined,
         collectedById: user.userId,
         capturedAt: new Date(m.capturedAt),
         sourceKey: m.idempotencyKey,

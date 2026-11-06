@@ -50,6 +50,13 @@ export class AuthController {
     return this.auth.login(body);
   }
 
+  @Public()
+  @Post('mfa/verify')
+  @HttpCode(200)
+  verify(@Body(new ZodPipe(z.object({ mfaToken: z.string(), code: z.string() }))) body: { mfaToken: string; code: string }) {
+    return this.auth.verifyMfa(body.mfaToken, body.code);
+  }
+
   @Get('me')
   me(@CurrentUser() user: AuthUser) {
     return user;
@@ -57,7 +64,7 @@ export class AuthController {
 }
 
 @Controller('sync')
-@Roles('DSR')
+@Roles('DSR', 'RETAILER')
 export class SyncController {
   constructor(
     private readonly sync: SyncService,
@@ -136,7 +143,7 @@ export class DistributionController {
   @Post('deliveries/:id/deliver')
   @Roles('DISTRIBUTOR', 'ADMIN')
   deliver(@CurrentUser() user: AuthUser, @Param('id') id: string, @Body(new ZodPipe(DeliverSchema)) body: z.infer<typeof DeliverSchema>) {
-    return this.prisma.tx((tx) => this.fulfilment.deliver(tx, user, id, body.podNote)).then(() => ({ ok: true }));
+    return this.prisma.tx((tx) => this.fulfilment.deliver(tx, user, id, body.podNote, body.cod)).then(() => ({ ok: true }));
   }
 
   @Get('returns')
@@ -258,13 +265,15 @@ export class HqController {
       this.prisma.distributor.findMany({ where: t }),
       this.prisma.outlet.findMany({ where: t, include: { channel: true, services: { include: { rtmModel: true, distributor: { select: { code: true } } } } }, orderBy: { code: 'asc' } }),
       this.prisma.product.findMany({ where: t, include: { brand: true }, orderBy: { code: 'asc' } }),
-      this.prisma.priceList.findMany({ where: t, include: { _count: { select: { items: true } } } }),
+      this.prisma.priceList.findMany({ where: t, include: { _count: { select: { items: true } } }, orderBy: [{ code: 'asc' }, { validFrom: 'asc' }] }),
       this.prisma.scheme.findMany({ where: t }),
       this.prisma.marginRule.findMany({ where: t }),
       this.prisma.user.findMany({ where: t, select: { id: true, name: true, email: true, role: true, title: true, hierarchyPath: true } }),
       this.prisma.beat.findMany({ where: t, include: { dsr: { select: { name: true } }, _count: { select: { outlets: true } } } }),
     ]);
-    return { channels, rtmModels, distributors, outlets, products, priceLists, schemes, marginRules, users, beats };
+    const brandCode = new Map(products.map((p) => [p.brandId, p.brand.code]));
+    const withBrands = outlets.map((o) => ({ ...o, services: o.services.map((s) => ({ ...s, brandCodes: s.brandIds.map((b) => brandCode.get(b) ?? b) })) }));
+    return { channels, rtmModels, distributors, outlets: withBrands, products, priceLists, schemes, marginRules, users, beats };
   }
 
   /** Retailer shell placeholder until eB2B (Phase 5): own orders + outstanding. */

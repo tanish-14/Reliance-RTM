@@ -35,7 +35,39 @@ export const Accounts = {
   cgstOut: { code: 'GST_OUT_CGST', name: 'Output CGST', type: 'LIABILITY' } as AccountSpec,
   sgstOut: { code: 'GST_OUT_SGST', name: 'Output SGST', type: 'LIABILITY' } as AccountSpec,
   igstOut: { code: 'GST_OUT_IGST', name: 'Output IGST', type: 'LIABILITY' } as AccountSpec,
+  /** Online payments captured by the gateway, not yet settled to the bank. */
+  gatewayClearing: { code: 'GATEWAY_CLEARING', name: 'Payment gateway clearing', type: 'ASSET' } as AccountSpec,
+  gatewayFees: { code: 'GATEWAY_FEES', name: 'Payment gateway fees', type: 'EXPENSE' } as AccountSpec,
+  bank: { code: 'BANK', name: 'Bank', type: 'ASSET' } as AccountSpec,
+  /** Deposits / transfers declared but not yet seen on the bank statement. */
+  bankClearing: { code: 'BANK_CLEARING', name: 'Bank clearing (awaiting statement)', type: 'ASSET' } as AccountSpec,
+  chequesInHand: { code: 'CHEQUES_IN_HAND', name: 'Cheques in hand / in clearing', type: 'ASSET' } as AccountSpec,
+  cashShortage: (userId: string, userName: string): AccountSpec => ({
+    code: `CASH_SHORT:${userId}`,
+    name: `Cash shortage recoverable — ${userName}`,
+    type: 'ASSET',
+    partyType: 'USER',
+    partyId: userId,
+  }),
+  cashExcess: { code: 'CASH_EXCESS', name: 'Cash excess (suspense)', type: 'LIABILITY' } as AccountSpec,
+  shortageWriteOff: { code: 'CASH_SHORT_WRITEOFF', name: 'Cash shortages written off', type: 'EXPENSE' } as AccountSpec,
+  /** Distributor's books: scheme claims receivable from the company. */
+  claimReceivable: { code: 'CLAIM_RECEIVABLE', name: 'Scheme claims receivable from RCPL', type: 'ASSET' } as AccountSpec,
+  claimIncome: { code: 'SCHEME_REIMBURSEMENT', name: 'Scheme reimbursement income', type: 'INCOME' } as AccountSpec,
+  /** Company books. */
+  schemeExpense: { code: 'SCHEME_EXPENSE', name: 'Trade scheme expense', type: 'EXPENSE' } as AccountSpec,
+  distributorPayable: (distributorId: string, name: string): AccountSpec => ({
+    code: `DIST_PAYABLE:${distributorId}`,
+    name: `Payable to distributor — ${name}`,
+    type: 'LIABILITY',
+    partyType: 'DISTRIBUTOR',
+    partyId: distributorId,
+  }),
+  /** Retailer cashback credited after delivery. */
+  cashbackExpense: { code: 'CASHBACK_EXPENSE', name: 'Retailer cashback', type: 'EXPENSE' } as AccountSpec,
 };
+
+export const COMPANY_BOOK = 'COMPANY';
 
 export interface PostLine {
   account: AccountSpec;

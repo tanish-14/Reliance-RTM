@@ -11,6 +11,7 @@ import { dbFor, type BundleOutlet, type OutboxItem } from '../../offline/db';
 import { capture, replaySynced, startAutoSync, syncNow, useSync } from '../../offline/sync';
 import { quote, type DeviceQuote } from '../../offline/pricing';
 import { currentFix } from '../../offline/geo';
+import { DayEnd } from './DayEnd';
 
 function useDb() {
   const user = useAuth((s) => s.user)!;
@@ -55,6 +56,7 @@ export function DsrApp() {
       nav={[
         { to: '/dsr', label: 'Today', end: true },
         { to: '/dsr/outbox', label: 'Sync queue' },
+        { to: '/dsr/cash', label: 'Day-end cash' },
         { to: '/dsr/settings', label: 'Settings' },
       ]}
     >
@@ -69,6 +71,7 @@ export function DsrApp() {
           <Route path="outlet/:id/return" element={<ReturnPage />} />
           <Route path="outbox" element={<Outbox />} />
           <Route path="settings" element={<Settings />} />
+          <Route path="cash" element={<DayEnd />} />
         </Routes>
       )}
     </Shell>
@@ -312,19 +315,20 @@ function OrderPage() {
 function CollectPage() {
   const outlet = useOutlet();
   const navigate = useNavigate();
-  const [mode, setMode] = useState<'CASH' | 'UPI'>('CASH');
+  const [mode, setMode] = useState<'CASH' | 'UPI' | 'CHEQUE'>('CASH');
+  const [chq, setChq] = useState({ no: '', bank: '' });
   const [amount, setAmount] = useState('');
   const [ref, setRef] = useState('');
   if (!outlet) return <Empty>Outlet not found.</Empty>;
   const paise = Math.round(parseFloat(amount || '0') * 100);
-  const valid = paise > 0 && (mode === 'CASH' || ref.trim().length >= 6);
+  const valid = paise > 0 && (mode === 'CASH' || (mode === 'UPI' && ref.trim().length >= 6) || (mode === 'CHEQUE' && /^\d{6}$/.test(chq.no) && chq.bank.length > 1));
   return (
     <Card title={`Collect from ${outlet.name}`}>
       <div className="space-y-3">
-        <div className="grid grid-cols-2 gap-2">
-          {(['CASH', 'UPI'] as const).map((m) => (
+        <div className="grid grid-cols-3 gap-2">
+          {(['CASH', 'UPI', 'CHEQUE'] as const).map((m) => (
             <Button key={m} variant={mode === m ? 'primary' : 'secondary'} onClick={() => setMode(m)}>
-              {m === 'CASH' ? 'Cash' : 'UPI'}
+              {m === 'CASH' ? 'Cash' : m === 'UPI' ? 'UPI' : 'Cheque'}
             </Button>
           ))}
         </div>
@@ -338,12 +342,18 @@ function CollectPage() {
             <Input value={ref} onChange={(e) => setRef(e.target.value)} placeholder="e.g. 431298765432" />
           </div>
         )}
-        <p className="text-xs text-slate-500">{mode === 'CASH' ? 'Cash stays in your cash-in-transit until you deposit it.' : 'UPI is confirmed against the gateway after sync.'}</p>
+        {mode === 'CHEQUE' && (
+          <div className="grid grid-cols-2 gap-2">
+            <div><Label>Cheque no.</Label><Input inputMode="numeric" value={chq.no} onChange={(e) => setChq({ ...chq, no: e.target.value })} placeholder="6 digits" /></div>
+            <div><Label>Bank</Label><Input value={chq.bank} onChange={(e) => setChq({ ...chq, bank: e.target.value })} placeholder="e.g. SBI" /></div>
+          </div>
+        )}
+        <p className="text-xs text-slate-500">{mode === 'CHEQUE' ? 'The cheque reduces dues now; a bounce restores them.' : mode === 'CASH' ? 'Cash stays in your cash-in-transit until you deposit it.' : 'UPI is confirmed against the gateway after sync.'}</p>
         <Button
           className="w-full"
           disabled={!valid}
           onClick={async () => {
-            await capture('COLLECTION', { outletId: outlet.id, mode, amountPaise: paise, reference: mode === 'UPI' ? ref.trim() : undefined }, `${mode} ${rupees(paise)} from ${outlet.name}`, outlet.id);
+            await capture('COLLECTION', { outletId: outlet.id, mode, amountPaise: paise, reference: mode === 'UPI' ? ref.trim() : undefined, ...(mode === 'CHEQUE' ? { chequeNo: chq.no, chequeBank: chq.bank } : {}) }, `${mode} ${rupees(paise)} from ${outlet.name}`, outlet.id);
             navigate(`/dsr/outlet/${outlet.id}`);
           }}
         >
